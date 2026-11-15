@@ -28,8 +28,9 @@ repository contents.
 ```bash
 npm install
 npm run dev        # http://localhost:3000 → serves app.html with hot reload
-npm run lint       # typecheck (tsc --noEmit)
-npm test           # parser/mesher unit tests
+npm run lint       # typecheck (tsc --noEmit, strict)
+npm test           # parser/mesher + shader-wiring unit tests
+npm run lint:shaders  # expand the GLSL and lint it structurally (no GPU needed)
 npm run build      # rebuild the standalone index.html
 ```
 
@@ -46,3 +47,12 @@ together with your source changes — that keeps the double-clickable page and t
 | `src/renderer/` | three.js viewport, shader library, lighting/shadow helpers |
 | `src/components/` | UI (top bar, control sidebar, light panel) |
 | `scripts/inline-build.mjs` | Inlines the Vite build into the standalone `index.html` |
+| `scripts/dump-shaders.ts`, `scripts/check-shaders.py` | Expand + structurally lint the generated GLSL |
+
+## Rendering notes
+
+- Section slicing (`Slice X/Y/Z`) is implemented as a three.js **local clipping plane** on every
+  voxel material, so the shadow pass and light picking follow the cut.
+- Tiled exports (beyond the size the composer can render in one pass) approximate the studio post
+  pass in 2D; chromatic aberration is only applied when the composer can render the target in a
+  single pass (most 4K/8K sizes).

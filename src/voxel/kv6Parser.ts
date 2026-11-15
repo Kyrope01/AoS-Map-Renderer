@@ -18,6 +18,25 @@ export interface Kv6VoxelInput {
 }
 
 /**
+ * Linear-probe hash lookup shared by the parser and `Kv6Grid`.
+ * Keys store `flatIndex + 1`; `0` marks an empty slot.
+ */
+function lookupIndexed(
+  keys: Uint32Array,
+  vals: Uint32Array,
+  mask: number,
+  key: number,
+): number {
+  let slot = Math.imul(key ^ (key >>> 16), 0x45d9f3b) & mask;
+  while (true) {
+    const k = keys[slot];
+    if (k === key) return vals[slot];
+    if (k === 0) return 0;
+    slot = (slot + 1) & mask;
+  }
+}
+
+/**
  * Dense or sparse VoxelGrid backed by a flat Uint32Array when grid volume <= 8M,
  * or open-addressed typed hash table for gigantic bounding boxes.
  */
@@ -31,7 +50,14 @@ class Kv6Grid implements VoxelGrid {
   readonly waterColor: number | null = null;
 
   private readonly dense: Uint32Array | null;
-  private readonly sparseKeys: Int32Array | null;
+  /**
+   * Open-addressed (linear-probed) hash table for volumes that are too large
+   * for a dense array. Keys store `flatIndex + 1` and use `0` as the empty
+   * sentinel, so the full unsigned 32-bit index range stays addressable
+   * (a signed Int32Array would wrap indices >= 2^31 negative and collide with
+   * the `-1` empty marker, silently dropping voxels).
+   */
+  private readonly sparseKeys: Uint32Array | null;
   private readonly sparseVals: Uint32Array | null;
   private readonly sparseMask: number;
 
@@ -42,7 +68,7 @@ class Kv6Grid implements VoxelGrid {
     pivot: [number, number, number],
     voxelCount: number,
     dense: Uint32Array | null,
-    sparseKeys: Int32Array | null,
+    sparseKeys: Uint32Array | null,
     sparseVals: Uint32Array | null,
     sparseMask: number,
   ) {
@@ -57,17 +83,9 @@ class Kv6Grid implements VoxelGrid {
     this.sparseMask = sparseMask;
   }
 
+  /** @param key stored key, i.e. `flatIndex + 1` (0 means empty) */
   private lookupSparse(key: number): number {
-    const keys = this.sparseKeys!;
-    const vals = this.sparseVals!;
-    const mask = this.sparseMask;
-    let slot = Math.imul(key ^ (key >>> 16), 0x45d9f3b) & mask;
-    while (true) {
-      const k = keys[slot];
-      if (k === key) return vals[slot];
-      if (k === -1) return 0;
-      slot = (slot + 1) & mask;
-    }
+    return lookupIndexed(this.sparseKeys!, this.sparseVals!, this.sparseMask, key);
   }
 
   isSolid(x: number, y: number, z: number): boolean {
@@ -89,7 +107,7 @@ class Kv6Grid implements VoxelGrid {
     if (this.dense) {
       return this.dense[idx];
     }
-    return this.lookupSparse(idx);
+    return this.lookupSparse(idx + 1);
   }
 
   forEachSolid(cb: (x: number, y: number, z: number, color: number) => void, bounds?: RegionBounds): void {
@@ -104,7 +122,8 @@ class Kv6Grid implements VoxelGrid {
       for (let i = 0; i < this.dense.length; i++) if (this.dense[i]) visit(i, this.dense[i]);
     } else {
       for (let i = 0; i < this.sparseKeys!.length; i++) {
-        if (this.sparseKeys![i] !== -1) visit(this.sparseKeys![i], this.sparseVals![i]);
+        const key = this.sparseKeys![i];
+        if (key !== 0) visit(key - 1, this.sparseVals![i]);
       }
     }
   }
@@ -141,10 +160,26 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
     throw new VoxelParseError(`Invalid .kv6 dimensions: ${xsiz}×${ysiz}×${zsiz}.`);
   }
 
+  if (xsiz * ysiz * zsiz >= 2 ** 32) {
+    // Sparse keys are Uint32 flat indices; a larger volume cannot be addressed.
+    throw new VoxelParseError(
+      `Invalid .kv6 dimensions: ${xsiz}×${ysiz}×${zsiz} exceeds the addressable ${2 ** 32} voxel limit.`,
+    );
+  }
+
   const xpiv = view.getFloat32(16, true);
   const ypiv = view.getFloat32(20, true);
   const zpiv = view.getFloat32(24, true);
   const numvoxs = view.getUint32(28, true);
+
+  // Validate the voxel payload before allocating anything sized by numvoxs, so a
+  // corrupt header cannot request a multi-gigabyte buffer.
+  const maxVoxelsForSize = Math.floor(bytes.byteLength / 8);
+  if (numvoxs > maxVoxelsForSize) {
+    throw new VoxelParseError(
+      `Truncated .kv6 file: header claims ${numvoxs} voxels but the file can only hold ${maxVoxelsForSize}.`,
+    );
+  }
 
   const voxelDataOffset = 32;
   const xoffsetOffset = voxelDataOffset + numvoxs * 8;
@@ -165,27 +200,32 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
 
   const useDense = volume <= 8_388_608;
   let dense: Uint32Array | null = null;
-  let sparseKeys: Int32Array | null = null;
+  let sparseKeys: Uint32Array | null = null;
   let sparseVals: Uint32Array | null = null;
   let sparseMask = 0;
 
   if (useDense) {
     dense = new Uint32Array(volume);
   } else {
+    // Never allocate more than the voxel payload justifies (guards against a
+    // corrupt numvoxs making the table grow by 1 GB+ before the column table
+    // validation below rejects the file).
+    const wanted = Math.min(numvoxs, maxVoxelsForSize);
     let cap = 1024;
-    while (cap < numvoxs * 2) cap <<= 1;
-    sparseKeys = new Int32Array(cap).fill(-1);
+    while (cap < wanted * 2) cap <<= 1;
+    sparseKeys = new Uint32Array(cap);
     sparseVals = new Uint32Array(cap);
     sparseMask = cap - 1;
   }
 
+  /** @param key stored key (`flatIndex + 1`); `0` is reserved as the empty marker. */
   const insertSparse = (key: number, val: number) => {
     const keys = sparseKeys!;
     const vals = sparseVals!;
     let slot = Math.imul(key ^ (key >>> 16), 0x45d9f3b) & sparseMask;
     while (true) {
       const k = keys[slot];
-      if (k === -1 || k === key) {
+      if (k === 0 || k === key) {
         keys[slot] = key;
         vals[slot] = val;
         return;
@@ -195,6 +235,9 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
   };
 
   let voxCursor = 0;
+  // Count what actually lands in the grid: skipped (`zRaw >= zsiz`) and
+  // duplicate voxels are not part of the model.
+  let placedVoxels = 0;
   for (let x = 0; x < xsiz; x++) {
     for (let y = 0; y < ysiz; y++) {
       const colCount = view.getUint16(xyoffsetOffset + (x * ysiz + y) * 2, true);
@@ -216,9 +259,15 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
           const idx = (gy * depth + gz) * width + gx;
           const packed = (0xff << 24) | (r << 16) | (g << 8) | b;
           if (dense) {
+            if (dense[idx] === 0) placedVoxels++;
             dense[idx] = packed;
           } else {
-            insertSparse(idx, packed);
+            // `idx + 1` never wraps: the parser rejects volumes >= 2^32 below.
+            const key = idx + 1;
+            if (lookupIndexed(sparseKeys!, sparseVals!, sparseMask, key) === 0) {
+              placedVoxels++;
+            }
+            insertSparse(key, packed);
           }
         }
       }
@@ -230,8 +279,12 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
     width,
     height,
     depth,
+    // The Voxlap pivot is converted to Y-up for completeness, but the mesher
+    // intentionally centres X/Z and grounds Y from the voxel bounds instead of
+    // rotating around the pivot — AoS .kv6 props read better that way. Keep the
+    // value available for callers that need the authoring origin.
     [xpiv, zsiz - 1 - zpiv, ypiv],
-    numvoxs,
+    placedVoxels,
     dense,
     sparseKeys,
     sparseVals,
@@ -308,14 +361,17 @@ export function encodeKv6(
 
     let vis = v.vis;
     if (vis === undefined) {
+      // Voxlap .kv6 face bits are 1 = occluded / 0 = visible on each axis, and
+      // the engine only uses the 6 low bits.
       vis = 0;
-      if (!isOccupied(v.x - 1, v.y, v.z)) vis |= 1;
-      if (!isOccupied(v.x + 1, v.y, v.z)) vis |= 2;
-      if (!isOccupied(v.x, v.y - 1, v.z)) vis |= 4;
-      if (!isOccupied(v.x, v.y + 1, v.z)) vis |= 8;
-      if (!isOccupied(v.x, v.y, v.z - 1)) vis |= 16;
-      if (!isOccupied(v.x, v.y, v.z + 1)) vis |= 32;
+      if (isOccupied(v.x - 1, v.y, v.z)) vis |= 1;
+      if (isOccupied(v.x + 1, v.y, v.z)) vis |= 2;
+      if (isOccupied(v.x, v.y - 1, v.z)) vis |= 4;
+      if (isOccupied(v.x, v.y + 1, v.z)) vis |= 8;
+      if (isOccupied(v.x, v.y, v.z - 1)) vis |= 16;
+      if (isOccupied(v.x, v.y, v.z + 1)) vis |= 32;
     }
+    vis &= 0x3f;
     out[off + 6] = vis;
     out[off + 7] = v.dir ?? 0;
 

@@ -194,6 +194,10 @@ export interface SharedShaderUniforms {
   uShowSky: { value: number };
 }
 
+// `uSliceAxis` / `uSliceCoord` stay in the shared uniforms because the voxel
+// point-light shadow test uses them to ignore geometry that the cut removed; the
+// visible cut itself is a clipping plane built in ./slice.
+
 export function createSharedUniforms(): SharedShaderUniforms {
   // Two RGBA float texels per light: world position/range and linear color/intensity.
   // Unlike uniform arrays, this does not consume fragment-uniform slots per light.
@@ -394,7 +398,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
           vec3 sp = cameraPosition + rayDir * t;
 
           float hNorm = clamp((sp.y + 0.5) / cloudTop, 0.0, 1.0);
-          float heightEnv = smoothstep(1.0, 0.16, hNorm);
+          float heightEnv = 1.0 - smoothstep(0.16, 1.0, hNorm);
 
           vec3 np = vec3(sp.x * freq + uTime * 0.07, sp.y * freq * 1.9, sp.z * freq - uTime * 0.045);
           float n = cloudFbm(np);
@@ -842,12 +846,12 @@ export function createPbrVoxelMaterial(
         ${FOG_AND_VOLUMETRIC_GLSL}
         ${VOXEL_LIGHT_GLSL}`,
       )
+      // Section slicing runs through `material.clippingPlanes` (see
+      // syncSlicePlanes in VoxelViewport): the built-in chunk below is honoured
+      // by the shadow/depth pass too, which the old manual `discard` was not.
       .replace(
         '#include <clipping_planes_fragment>',
-        `#include <clipping_planes_fragment>
-        if (uSliceAxis == 1 && vVoxelLocalPos.x > uSliceCoord) discard;
-        if (uSliceAxis == 2 && vVoxelLocalPos.y > uSliceCoord) discard;
-        if (uSliceAxis == 3 && vVoxelLocalPos.z > uSliceCoord) discard;`,
+        `#include <clipping_planes_fragment>`,
       )
       .replace(
         '#include <color_fragment>',
@@ -865,11 +869,18 @@ export function createPbrVoxelMaterial(
         '#include <opaque_fragment>',
         `outgoingLight += voxelLightContribution(vVoxelWorldPos,
           normalize(inverseTransformDirection(normalize(vCustomViewNormal), viewMatrix)), diffuseColor.rgb);
-        #include <opaque_fragment>`,
+        #include <opaque_fragment>`, // voxel lights -> then fog, see the next replace()
       )
+      // Fog has to run on linear radiance *before* tone mapping and the sRGB
+      // encode, exactly like the stylized shaders. `<fog_fragment>` sits after
+      // `<tonemapping_fragment>` / `<colorspace_fragment>` in the stock chain,
+      // so mixing fog colour in there blended a linear colour into sRGB output
+      // (visible on the software-GL path and on every tiled export, which skip
+      // the composer). Inject it at the end of the opaque fragment instead.
       .replace(
-        '#include <fog_fragment>',
-        `gl_FragColor.rgb = computeSceneFog(gl_FragColor.rgb, vVoxelWorldPos, max(0.0, vVoxelDepth), 0.0);`,
+        '#include <opaque_fragment>',
+        `#include <opaque_fragment>
+        gl_FragColor.rgb = computeSceneFog(gl_FragColor.rgb, vVoxelWorldPos, max(0.0, vVoxelDepth), 0.0);`,
       );
   };
 
@@ -878,6 +889,7 @@ export function createPbrVoxelMaterial(
 }
 
 const SHARED_VERTEX_SHADER = /* glsl */ `
+  #include <clipping_planes_pars_vertex>
   attribute float aAo;
 
   varying vec3 vColor;
@@ -885,14 +897,12 @@ const SHARED_VERTEX_SHADER = /* glsl */ `
   varying vec3 vWorldNormal;
   varying vec3 vViewNormal;
   varying vec3 vViewPos;
-  varying vec3 vLocalPos;
   varying vec3 vWorldPos;
   varying float vDepthDist;
 
   void main() {
     vColor = color;
     vAo = aAo;
-    vLocalPos = position;
 
     vec4 worldPosition = modelMatrix * vec4(position, 1.0);
     vWorldPos = worldPosition.xyz;
@@ -904,10 +914,14 @@ const SHARED_VERTEX_SHADER = /* glsl */ `
     vDepthDist = -mvPosition.z;
 
     gl_Position = projectionMatrix * mvPosition;
+
+    // three's clipping_planes_vertex chunk reads mvPosition, in scope here.
+    #include <clipping_planes_vertex>
   }
 `;
 
 const FRAGMENT_PREAMBLE = /* glsl */ `
+  #include <clipping_planes_pars_fragment>
   uniform float uTime;
   uniform float uAoStrength;
   uniform float uOutlineStrength;
@@ -939,15 +953,8 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
   varying vec3 vWorldNormal;
   varying vec3 vViewNormal;
   varying vec3 vViewPos;
-  varying vec3 vLocalPos;
   varying vec3 vWorldPos;
   varying float vDepthDist;
-
-  void applySliceClip() {
-    if (uSliceAxis == 1 && vLocalPos.x > uSliceCoord) discard;
-    if (uSliceAxis == 2 && vLocalPos.y > uSliceCoord) discard;
-    if (uSliceAxis == 3 && vLocalPos.z > uSliceCoord) discard;
-  }
 
   ${FOG_AND_VOLUMETRIC_GLSL}
 
@@ -960,14 +967,15 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
 
 function makeStylizedShader(
   mode: Exclude<ShaderMode, 'pbr'>,
-  uniforms: SharedShaderUniforms,
+  shared: SharedShaderUniforms,
 ): THREE.ShaderMaterial {
+  const uniforms = { ...shared };
   let body = '';
 
   if (mode === 'atmospheric') {
     body = /* glsl */ `
       void main() {
-        applySliceClip();
+        #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         vec3 V = normalize(cameraPosition - vWorldPos);
@@ -1003,7 +1011,7 @@ function makeStylizedShader(
   } else if (mode === 'diorama') {
     body = /* glsl */ `
       void main() {
-        applySliceClip();
+        #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         vec3 VN = normalize(vViewNormal);
@@ -1034,7 +1042,7 @@ function makeStylizedShader(
   } else if (mode === 'cinema') {
     body = /* glsl */ `
       void main() {
-        applySliceClip();
+        #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         vec3 V = normalize(cameraPosition - vWorldPos);
@@ -1067,7 +1075,7 @@ function makeStylizedShader(
   } else if (mode === 'voxlap') {
     body = /* glsl */ `
       void main() {
-        applySliceClip();
+        #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         float ao = mix(1.0, vAo, uAoStrength * 0.9);
@@ -1098,7 +1106,7 @@ function makeStylizedShader(
     // rim
     body = /* glsl */ `
       void main() {
-        applySliceClip();
+        #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         vec3 VN = normalize(vViewNormal);
@@ -1132,6 +1140,8 @@ function makeStylizedShader(
 }
 
 export interface MaterialBank {
+  /** Every voxel material (PBR + stylized) for shared material-wide settings. */
+  all: THREE.Material[];
   pbr: THREE.MeshPhysicalMaterial;
   atmospheric: THREE.ShaderMaterial;
   diorama: THREE.ShaderMaterial;
@@ -1149,7 +1159,22 @@ export function createMaterialBank(shared: SharedShaderUniforms): MaterialBank {
   const voxlap = makeStylizedShader('voxlap', shared);
   const rim = makeStylizedShader('rim', shared);
 
+  // Section slicing is a local clipping plane on every voxel material. three.js
+  // injects the (camera-space) `clippingPlanes` uniform itself for materials with
+  // `clipping: true`, and applies the same planes in the shadow pass because
+  // `clipShadows` is on.
+  const sliced: THREE.Material[] = [pbr, atmospheric, diorama, cinema, voxlap, rim];
+  for (const material of sliced) {
+    // ShaderMaterial only receives the projected `clippingPlanes` uniform when
+    // `clipping` is set (MeshPhysicalMaterial is always wired). `clipShadows`
+    // makes the shadow/depth pass honour the same planes.
+    if (material instanceof THREE.ShaderMaterial) material.clipping = true;
+    material.clipShadows = true;
+    material.clippingPlanes = [];
+  }
+
   return {
+    all: [pbr, atmospheric, diorama, cinema, voxlap, rim],
     pbr,
     atmospheric,
     diorama,

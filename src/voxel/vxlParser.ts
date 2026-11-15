@@ -127,6 +127,8 @@ export interface VxlParseOptions {
   height?: number;
 }
 
+export const AOS_VXL_MAX_DIMENSION = 4096;
+
 /**
  * Parses an Ace of Spades (2011) / Voxlap column-RLE `.vxl` file.
  * Default dimensions are 512 × 512 × 64 (standard headerless AoS v0.75 format).
@@ -141,7 +143,22 @@ export function parseVxl(
   const depth = options.depth ?? AOS_VXL_DEPTH;
   const height = options.height ?? AOS_VXL_HEIGHT;
 
-  if (height > 64 || height <= 0) {
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(depth) ||
+    !Number.isInteger(height) ||
+    width <= 0 ||
+    depth <= 0 ||
+    height <= 0 ||
+    width > AOS_VXL_MAX_DIMENSION ||
+    depth > AOS_VXL_MAX_DIMENSION
+  ) {
+    throw new VoxelParseError(
+      `Invalid .vxl dimensions ${width}×${depth}×${height}: width and depth must be 1..${AOS_VXL_MAX_DIMENSION}, height 1..64.`,
+    );
+  }
+
+  if (height > 64) {
     throw new VoxelParseError(`Invalid .vxl height ${height}: must be 1..64.`);
   }
 
@@ -163,8 +180,10 @@ export function parseVxl(
   let surfColor = new Uint32Array(surfCap);
   let surfLen = 0;
 
-  // Reusable scratch buffer for overhang bottom colors (avoids per-span array allocations)
-  const pendingBottomBuf = new Uint32Array(64);
+  // Reusable scratch buffer for overhang bottom colors (avoids per-span array allocations).
+  // A column is at most `height` (<= 64) voxels tall, and a bottom color run can
+  // never be longer than the column, so this always fits a valid file.
+  const pendingBottomBuf = new Uint32Array(height);
   let pendingBottomLen = 0;
 
   const growSurface = () => {
@@ -291,6 +310,14 @@ export function parseVxl(
         }
 
         const lenBottom = numChunks - 1 - lenTop;
+        if (lenBottom > height) {
+          // `numChunks` is a single byte, so a corrupt value can claim up to 254
+          // bottom colors. Typed-array writes past the end are silent no-ops, so
+          // without this check the column would silently lose its surface colors.
+          throw new VoxelParseError(
+            `Invalid .vxl chunk count (${numChunks}) at column (${gx}, ${gz}): more spans than the ${height}-voxel column can hold.`,
+          );
+        }
         if (pos + lenBottom * 4 > byteLen) {
           throw new VoxelParseError(
             `Truncated .vxl bottom color data at column (${gx}, ${gz}).`,
@@ -423,8 +450,12 @@ export function encodeVxl(
         const airStart = z;
         while (z < height && !isSolidAt(gx, z, gz)) z++;
         if (z >= height) {
-          out.push(0, height - 1, height - 1, airStart);
-          out.push(DIRT_B, DIRT_G, DIRT_R, 0x7f);
+          // The column ends in air (all-air column, or air beneath an overhang).
+          // Emit a zero-chunk span with an empty top run: `topStart === height`
+          // reads back as a zero-length final span, so no phantom bottom voxel
+          // is invented. `airStart` still carries the position that the parser
+          // needs to place a pending overhang bottom color run.
+          out.push(0, height, height - 1, airStart);
           break;
         }
         const topStart = z;

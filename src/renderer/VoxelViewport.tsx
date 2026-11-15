@@ -26,6 +26,7 @@ import {
   SharedShaderUniforms,
   syncSharedUniforms,
 } from './shaders';
+import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
 
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
@@ -46,6 +47,8 @@ interface VoxelViewportProps {
   settings: RenderSettings;
   onFileDrop: (file: File) => void;
   onAdjustFlySpeed?: (nextSpeed: number) => void;
+  /** Called when free cam makes the orbit-only turntable spin meaningless. */
+  onDisableAutoRotate?: () => void;
   voxelLights: VoxelLight[];
   pickingMode: boolean;
   onVoxelPicked: (x: number, y: number, z: number, normal: [number, number, number]) => void;
@@ -164,7 +167,7 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
   function VoxelViewport(
-    { builtMesh, voxelGrid, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, voxelLights, pickingMode, onVoxelPicked },
+    { builtMesh, voxelGrid, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, onDisableAutoRotate, voxelLights, pickingMode, onVoxelPicked },
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
@@ -178,6 +181,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
     builtMeshRef.current = builtMesh;
     const flySpeedCbRef = useRef(onAdjustFlySpeed);
     flySpeedCbRef.current = onAdjustFlySpeed;
+    const disableAutoRotateRef = useRef(onDisableAutoRotate);
+    disableAutoRotateRef.current = onDisableAutoRotate;
     const voxelLightsRef = useRef(voxelLights);
     voxelLightsRef.current = voxelLights;
     const pickingModeRef = useRef(pickingMode);
@@ -270,7 +275,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
       const handleContextRestored = () => {
         setContextLost(false);
+        // GPU resources are gone until three re-uploads them; the shadow atlas and
+        // the visible frame both have to be rebuilt, and the canvas stays black
+        // until something asks for a draw.
         renderer.shadowMap.needsUpdate = true;
+        requestRender();
       };
       renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
       renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
@@ -281,7 +290,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       scene.fog = null;
 
       const pmrem = new THREE.PMREMGenerator(renderer);
-      const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      const roomEnvironment = new RoomEnvironment();
+      const envTex = pmrem.fromScene(roomEnvironment, 0.04).texture;
       scene.environment = envTex;
       pmrem.dispose();
 
@@ -364,6 +374,15 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       // Shared Shader Uniforms + Material Bank
       const sharedUniforms: SharedShaderUniforms = createSharedUniforms();
       sharedUniforms.uTime.value = 1.4;
+
+      // Section slicing is expressed as a local clipping plane instead of a shader
+      // `discard`, because the shadow (depth) pass honours clipping planes
+      // (`clipShadows`) while a `discard` only affects the visible material.
+      // Raycasting still ignores clipping planes, so picking filters hits through
+      // `isInsideSlice` below.
+      const slicePlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+      renderer.localClippingEnabled = true;
+
       const materials: MaterialBank = createMaterialBank(sharedUniforms);
 
       let shadowGrid: VoxelGrid | null | undefined;
@@ -547,6 +566,21 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const hitNormal = new THREE.Vector3();
       const hoverVoxel = new THREE.Vector3(-1, -1, -1);
 
+      /**
+       * Closest raycast hit that is not hidden by the section slice. three's
+       * raycast only tests triangles, so sliced-away geometry would otherwise be
+       * pickable and lights could be attached to invisible voxels.
+       */
+      const firstVisibleHit = (): THREE.Intersection | null => {
+        const hits = raycaster.intersectObject(voxelMesh, false);
+        for (const candidate of hits) {
+          if (isInsideSlice(candidate.point.x, candidate.point.y, candidate.point.z)) {
+            return candidate;
+          }
+        }
+        return null;
+      };
+
       const pickVoxelAt = (clientX: number, clientY: number): boolean => {
         if (!voxelMesh.visible) return false;
         const rect = renderer.domElement.getBoundingClientRect();
@@ -556,9 +590,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           -((clientY - rect.top) / rect.height) * 2 + 1,
         );
         raycaster.setFromCamera(pointerNdc, activeCamera);
-        const hits = raycaster.intersectObject(voxelMesh, false);
-        if (hits.length === 0) return false;
-        const hit = hits[0];
+        const hit = firstVisibleHit();
+        if (!hit) return false;
         hitPoint.copy(hit.point);
         if (hit.face && hit.face.normal) {
           hitNormal.copy(hit.face.normal);
@@ -600,12 +633,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           -((clientY - rect.top) / rect.height) * 2 + 1,
         );
         raycaster.setFromCamera(pointerNdc, activeCamera);
-        const hits = raycaster.intersectObject(voxelMesh, false);
-        if (hits.length === 0) {
+        const hit = firstVisibleHit();
+        if (!hit) {
           hoverBox.visible = false;
           return;
         }
-        const hit = hits[0];
         hitPoint.copy(hit.point);
         if (hit.face && hit.face.normal) hitNormal.copy(hit.face.normal);
         else hitNormal.set(0, 1, 0);
@@ -628,10 +660,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         requestRender();
       };
 
+      const projectedScratch = new THREE.Vector3();
+      let lastCanvasRect: DOMRect | null = null;
       const projectVoxelToScreen = (x: number, y: number, z: number) => {
-        const rect = renderer.domElement.getBoundingClientRect();
-        voxelToWorld(x, y, z, hitPoint);
-        const projected = hitPoint.clone().project(activeCamera);
+        // Cached rect: the panel probes this every animation frame and a layout
+        // read per frame is what actually costs here.
+        const rect = lastCanvasRect ?? (lastCanvasRect = renderer.domElement.getBoundingClientRect());
+        voxelToWorld(x, y, z, projectedScratch);
+        const projected = projectedScratch.project(activeCamera);
         const visible =
           projected.z > -1 && projected.z < 1 &&
           projected.x > -1.2 && projected.x < 1.2 &&
@@ -658,7 +694,15 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         );
         composer.addPass(bloomPass);
         studioPass = new ShaderPass(StudioPostShader);
-        studioPass.uniforms.uResolution.value.set(width, height);
+        const initialPixelRatio = renderer.getPixelRatio();
+        bloomPass.resolution.set(
+          Math.round(width * initialPixelRatio),
+          Math.round(height * initialPixelRatio),
+        );
+        studioPass.uniforms.uResolution.value.set(
+          Math.round(width * initialPixelRatio),
+          Math.round(height * initialPixelRatio),
+        );
         composer.addPass(studioPass);
         composer.addPass(new OutputPass());
       }
@@ -718,6 +762,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let isLoopRunning = false;
       let renderBusy = false;
       let renderDirty = false;
+      // While a tiled export resizes the canvas and sets a view offset, any other
+      // render (settings change, resize, hover) would corrupt a tile and flash the
+      // stretched canvas. Defer those until the export restores its state.
+      let isExporting = false;
       let lastTime = performance.now();
       let elapsedSec = 1.4;
 
@@ -727,6 +775,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         else renderer.render(scene, activeCamera);
       };
 
+      // Software GL (SwiftShader / llvmpipe) renders on the CPU, so waiting for the
+      // fence and then sleeping used to hard-cap the loop at ~12 fps with ~80 ms of
+      // input latency on every frame. Poll faster and shorten the post-draw pause;
+      // the fence already guarantees we never queue work faster than it drains.
+      const SOFT_GL_POLL_MS = 2;
+      const SOFT_GL_SETTLE_MS = 16;
+
       function afterDraw(cb: () => void) {
         const gl = renderer.getContext() as WebGL2RenderingContext;
         const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -734,13 +789,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const poll = () => {
           const state = sync && gl.getSyncParameter(sync, gl.SYNC_STATUS);
           if (state === gl.UNSIGNALED) {
-            frameId = window.setTimeout(poll, 5);
+            frameId = window.setTimeout(poll, SOFT_GL_POLL_MS);
           } else {
             if (sync) gl.deleteSync(sync);
-            frameId = window.setTimeout(cb, 80);
+            frameId = window.setTimeout(cb, SOFT_GL_SETTLE_MS);
           }
         };
-        frameId = window.setTimeout(poll, 5);
+        frameId = window.setTimeout(poll, SOFT_GL_POLL_MS);
       }
 
       const hasActiveFreeKeys = () => {
@@ -761,12 +816,26 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         );
       };
 
+      const hasAnimatedWater = () => {
+        const meshData = builtMeshRef.current;
+        const s = settingsRef.current;
+        if (meshData?.format !== 'vxl') return false;
+        const hasWater =
+          meshData.waterColorHex !== null || s.waterColorOverride.trim().length > 0;
+        return hasWater && s.waveStrength > 0.001;
+      };
+
       const needsContinuousLoop = () => {
         const s = settingsRef.current;
         return (
           s.autoRotate ||
           camAnimating ||
-          hasActiveFreeKeys()
+          hasActiveFreeKeys() ||
+          // `uTime` only advances inside the loop, so waves, drifting volumetric
+          // clouds and cloud shadows freeze into a static (wrong-looking) frame
+          // when the camera is idle.
+          (s.volumetricClouds && s.volumetricStrength > 0.01) ||
+          hasAnimatedWater()
         );
       };
 
@@ -857,6 +926,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       }
 
       function requestRender() {
+        if (isExporting) {
+          renderDirty = true;
+          return;
+        }
         if (isLoopRunning) return;
         if (renderBusy) {
           renderDirty = true;
@@ -883,6 +956,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       }
 
       function startOrPokeLoop() {
+        if (isExporting) {
+          renderDirty = true;
+          return;
+        }
         if (needsContinuousLoop()) {
           if (!isLoopRunning) {
             isLoopRunning = true;
@@ -1020,8 +1097,47 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       window.addEventListener('keyup', onKeyUp);
       window.addEventListener('blur', onWindowBlur);
 
+      // Orthographic zoom survives a perspective <-> orthographic round trip.
+      let savedOrthoZoom = 1;
+
       let lastLightAz = settingsRef.current.lightAzimuth;
       let lastLightEl = settingsRef.current.lightElevation;
+      let lastSliceAxis = settingsRef.current.sliceAxis;
+      let sliceActive = false;
+
+      /**
+       * Mirrors the slice onto every voxel material.
+       *
+       * `slicePlane` is reused and only its normal/constant change, so three
+       * re-projects it on every draw and the shadow pass (which reads
+       * `material.clippingPlanes` per object) follows the cut immediately.
+       * Registering/removing the plane flips `NUM_CLIPPING_PLANES`, which three
+       * turns into a program rebuild by itself.
+       */
+      const applySlicePlanes = (active: boolean) => {
+        for (const material of materials.all) {
+          const planes = material.clippingPlanes;
+          if (active) {
+            if (!planes || planes.length === 0) material.clippingPlanes = [slicePlane];
+            else planes[0] = slicePlane;
+          } else if (planes && planes.length > 0) {
+            material.clippingPlanes = [];
+          }
+        }
+        sliceActive = active;
+      };
+
+      const syncSlicePlanes = (s: RenderSettings, bounds: THREE.Box3) => {
+        const active = computeSlicePlane(s.sliceAxis, s.slicePosition, bounds, slicePlane);
+        applySlicePlanes(active);
+      };
+
+      /**
+       * True when a world-space point survives the active section slice. Used to
+       * filter raycast hits, because three's raycast ignores clipping planes.
+       */
+      const isInsideSlice = (worldX: number, worldY: number, worldZ: number): boolean =>
+        !sliceActive || pointInsideSlice(slicePlane, worldX, worldY, worldZ);
 
       const syncSettings = () => {
         const s = settingsRef.current;
@@ -1033,7 +1149,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           ? (isCustom ? s.customHorizonColor : theme.fogHex)
           : s.fogColor || theme.fogHex;
         _fogColor.set(targetFogHex);
+        // Only visible where the sky dome is hidden (`graphite` / `paper`).
         (scene.background as THREE.Color).copy(_fogColor);
+        skyMesh.visible = theme.isSkyDome;
 
         const fogScale = Math.min(1, 32 / Math.max(32, modelRadius));
         const scaledFog = theme.fogDensity * s.fogDensity * fogScale;
@@ -1078,6 +1196,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           scaledFog,
         );
 
+        syncSlicePlanes(s, modelBounds);
+        if (sliceActive || s.sliceAxis !== lastSliceAxis) {
+          // The shadow pass is manual (autoUpdate = false) and now respects the
+          // clip plane, so the atlas must be rebuilt whenever the cut moves.
+          lastSliceAxis = s.sliceAxis;
+          renderer.shadowMap.needsUpdate = true;
+        }
+
         // Update Perspective FOV
         if (Math.abs(perspCamera.fov - s.cameraFov) > 0.01) {
           perspCamera.fov = s.cameraFov;
@@ -1091,6 +1217,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             controls.enabled = false;
             camAnimating = false;
             syncFreeAnglesFromCamera();
+            // Turntable spin only orbits the camera, so having it "on" in free cam
+            // is dead state that also keeps the animation loop alive. Switching to
+            // free cam turns it off.
+            if (s.autoRotate) disableAutoRotateRef.current?.();
           } else {
             _forward.set(0, 0, -1).applyQuaternion(activeCamera.quaternion).normalize();
             const targetDist = Math.max(24, modelRadius * 0.55);
@@ -1135,18 +1265,24 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         // Perspective vs Orthographic switch (only in Orbit mode; Free Cam uses Perspective)
         const targetCam =
           s.orthographic && s.cameraMode === 'orbit' ? orthoCamera : perspCamera;
+        if (activeCamera !== orthoCamera) savedOrthoZoom = orthoCamera.zoom;
         if (targetCam !== activeCamera) {
           targetCam.position.copy(activeCamera.position);
           targetCam.quaternion.copy(activeCamera.quaternion);
           const dist = activeCamera.position.distanceTo(controls.target);
           if (targetCam === orthoCamera) {
+            // Frame the same extent the perspective camera sees, and keep the
+            // user's zoom instead of snapping back to 1 every time the toggle
+            // flips (OrbitControls drives zoom on the ortho camera).
             const halfH = Math.max(4, dist * Math.tan(THREE.MathUtils.degToRad(perspCamera.fov * 0.5)));
             const curAspect = (container.clientWidth || 1) / (container.clientHeight || 1);
+            // OrbitControls zooms the ortho camera directly while it is active, so
+            // remember that value while still in perspective and restore it here.
             orthoCamera.left = -halfH * curAspect;
             orthoCamera.right = halfH * curAspect;
             orthoCamera.top = halfH;
             orthoCamera.bottom = -halfH;
-            orthoCamera.zoom = 1;
+            orthoCamera.zoom = savedOrthoZoom;
             orthoCamera.updateProjectionMatrix();
           }
           activeCamera = targetCam;
@@ -1179,7 +1315,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         voxelMesh.visible = true;
         const oldGeo = voxelMesh.geometry;
         voxelMesh.geometry = meshData.geometry;
-        oldGeo.dispose();
+        // On HMR/remount the init effect and the `[builtMesh]` effect both call
+        // syncMesh with the same mesh; disposing it would free the live geometry
+        // and force a wasteful re-upload.
+        if (oldGeo !== meshData.geometry) oldGeo.dispose();
 
         gridSize.copy(meshData.size);
         gridOffset.set(meshData.size.x * 0.5, 0, meshData.size.z * 0.5);
@@ -1240,6 +1379,16 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         });
 
       const exportPng = async (filename: string, targetWidth?: number) => {
+        if (isExporting) return;
+        isExporting = true;
+        const resumeLoopAfterExport = isLoopRunning;
+        if (isLoopRunning) {
+          isLoopRunning = false;
+          cancelAnimationFrame(frameId);
+          clearTimeout(frameId);
+        }
+        frameId = 0;
+
         // Hide editor-only helpers (light markers, pick highlight) from exports.
         const savedMarkerVisible = markerGroup.visible;
         const savedHoverVisible = hoverBox.visible;
@@ -1249,98 +1398,168 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
 
-        if (!targetWidth || targetWidth <= baseW) {
-          drawFrame();
-          try {
-            await downloadCanvasPng(renderer.domElement, filename);
-          } finally {
-            markerGroup.visible = savedMarkerVisible;
-            hoverBox.visible = savedHoverVisible;
-            drawFrame();
-          }
-          return;
-        }
-
-        const dims = computeUpscaledDimensions(baseW, baseH, targetWidth);
-        const targetW = dims.width;
-        const targetH = dims.height;
-
-        const savedPixelRatio = renderer.getPixelRatio();
-        const savedCssSize = new THREE.Vector2();
-        renderer.getSize(savedCssSize);
-
-        const gl = renderer.getContext();
-        const maxTex = (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) || 4096;
-        const maxRb = (gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number) || 4096;
-        const maxDirectDim = isSoftwareGl ? 1280 : Math.min(4096, maxTex, maxRb);
-
         try {
-          if (composer && !isSoftwareGl && targetW <= maxDirectDim && targetH <= maxDirectDim) {
-            renderer.setPixelRatio(1);
-            renderer.setSize(targetW, targetH, false);
-            composer.setPixelRatio(1);
-            composer.setSize(targetW, targetH);
-            if (bloomPass) bloomPass.resolution.set(targetW, targetH);
-            if (studioPass) studioPass.uniforms.uResolution.value.set(targetW, targetH);
+          if (!targetWidth || targetWidth <= baseW) {
             drawFrame();
             await downloadCanvasPng(renderer.domElement, filename);
             return;
           }
 
-          const outCanvas = document.createElement('canvas');
-          outCanvas.width = targetW;
-          outCanvas.height = targetH;
-          const outCtx = outCanvas.getContext('2d');
-          if (!outCtx) {
-            throw new Error('Could not allocate upscaled export buffer at this resolution.');
-          }
+          const dims = computeUpscaledDimensions(baseW, baseH, targetWidth);
+          const targetW = dims.width;
+          const targetH = dims.height;
 
-          const tileCap = isSoftwareGl ? 1024 : Math.min(2048, maxTex, maxRb);
-          const tiles = computeExportTiles(targetW, targetH, tileCap);
+          const savedPixelRatio = renderer.getPixelRatio();
+          const savedCssSize = new THREE.Vector2();
+          renderer.getSize(savedCssSize);
 
-          renderer.setPixelRatio(1);
-          for (let i = 0; i < tiles.length; i++) {
-            const tile = tiles[i];
-            renderer.setSize(tile.width, tile.height, false);
-            activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
-            skyMesh.position.copy(activeCamera.position);
-            renderer.render(scene, activeCamera);
-            outCtx.drawImage(renderer.domElement, tile.x, tile.y);
-            if (i % 4 === 3) {
-              await new Promise((r) => window.setTimeout(r, 0));
+          // The composer's bloom mips are sized for the viewport; while the canvas
+          // is temporarily resized they must not sample stale targets. Both the
+          // composer path and the single-pass path restore them afterwards.
+          const restorePostSize = () => {
+            const pixelRatio = renderer.getPixelRatio();
+            const pixelW = Math.max(1, Math.round(savedCssSize.x * pixelRatio));
+            const pixelH = Math.max(1, Math.round(savedCssSize.y * pixelRatio));
+            if (bloomPass) bloomPass.resolution.set(pixelW, pixelH);
+            if (studioPass) studioPass.uniforms.uResolution.value.set(pixelW, pixelH);
+          };
+
+
+          const gl = renderer.getContext();
+          const maxTex = (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) || 4096;
+          const maxRb = (gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number) || 4096;
+
+          // Tracked outside the tile branch so an error mid-export still restores
+          // the canvas instead of leaving it hidden/stretched.
+          let hiddenCanvas: HTMLCanvasElement | null = null;
+          let savedVisibility = '';
+          const restoreRendererSize = () => {
+            if (hiddenCanvas) {
+              hiddenCanvas.style.visibility = savedVisibility;
+              hiddenCanvas.style.width = '100%';
+              hiddenCanvas.style.height = '100%';
+              hiddenCanvas = null;
             }
-          }
+            activeCamera.clearViewOffset();
+            renderer.setPixelRatio(savedPixelRatio);
+            // `updateStyle = true`: setSize(tile, false) left the canvas CSS size
+            // frozen at the tile size, which is why tiled exports looked stretched.
+            renderer.setSize(savedCssSize.x, savedCssSize.y);
+            renderer.domElement.style.width = '100%';
+            renderer.domElement.style.height = '100%';
+            if (composer) {
+              composer.setPixelRatio(savedPixelRatio);
+              composer.setSize(savedCssSize.x, savedCssSize.y);
+            }
+            restorePostSize();
+          };
 
-          const vigStrength = settingsRef.current.vignette;
-          if (vigStrength > 0.001) {
-            const cx = targetW * 0.5;
-            const cy = targetH * 0.5;
-            const maxR = Math.hypot(cx, cy);
-            const grad = outCtx.createRadialGradient(cx, cy, maxR * 0.32, cx, cy, maxR);
-            grad.addColorStop(0, 'rgba(0,0,0,0)');
-            grad.addColorStop(1, `rgba(0,0,0,${(vigStrength * 0.55).toFixed(3)})`);
-            outCtx.fillStyle = grad;
-            outCtx.fillRect(0, 0, targetW, targetH);
-          }
+          try {
+            // Prefer a single composer render at the requested size: it keeps
+            // bloom / tilt-shift / chromatic / pixelate / vignette identical to
+            // the viewport.
+            if (composer && !isSoftwareGl && targetW <= maxTex && targetH <= maxRb) {
+              renderer.setPixelRatio(1);
+              renderer.setSize(targetW, targetH, false);
+              composer.setPixelRatio(1);
+              composer.setSize(targetW, targetH);
+              skyMesh.position.copy(activeCamera.position);
+              composer.render();
+              await downloadCanvasPng(renderer.domElement, filename);
+              return;
+            }
 
-          await downloadCanvasPng(outCanvas, filename);
+            const outCanvas = document.createElement('canvas');
+            outCanvas.width = targetW;
+            outCanvas.height = targetH;
+            const outCtx = outCanvas.getContext('2d');
+            if (!outCtx) {
+              throw new Error('Could not allocate upscaled export buffer at this resolution.');
+            }
+
+            // The canvas is temporarily resized to a single tile; hide it so the
+            // user does not see a stretched, flickering frame while the tiles render.
+            hiddenCanvas = renderer.domElement;
+            savedVisibility = hiddenCanvas.style.visibility;
+            hiddenCanvas.style.visibility = 'hidden';
+
+            const tileCap = isSoftwareGl ? 1024 : Math.min(2048, maxTex, maxRb);
+            const tiles = computeExportTiles(targetW, targetH, tileCap);
+
+            renderer.setPixelRatio(1);
+            for (let i = 0; i < tiles.length; i++) {
+              const tile = tiles[i];
+              renderer.setSize(tile.width, tile.height, false);
+              activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
+              skyMesh.position.copy(activeCamera.position);
+              // Direct render, deliberately not the composer: the composer's
+              // offscreen targets are sized to the viewport, so reusing it per tile
+              // would scale/crop the frame. The studio pass is approximated in 2D
+              // on the assembled image below instead.
+              renderer.render(scene, activeCamera);
+              outCtx.drawImage(renderer.domElement, tile.x, tile.y);
+              if (i % 4 === 3) {
+                await new Promise((r) => window.setTimeout(r, 0));
+              }
+            }
+
+            // The tile path bypasses the composer, so approximate the studio pass
+            // in 2D: the vignette and pixelate below mirror the shader versions
+            // (applied in sRGB space rather than linear, so the curve differs very
+            // slightly at extreme sizes). Chromatic aberration is skipped here;
+            // export at a size the composer can render in one pass (most 4K/8K
+            // targets) to get it.
+            const post = settingsRef.current;
+            if (post.vignette > 0.001) {
+              const cx = targetW * 0.5;
+              const cy = targetH * 0.5;
+              const maxR = Math.hypot(cx, cy);
+              const grad = outCtx.createRadialGradient(cx, cy, maxR * 0.32, cx, cy, maxR);
+              grad.addColorStop(0, 'rgba(0,0,0,0)');
+              grad.addColorStop(1, `rgba(0,0,0,${(post.vignette * 0.55).toFixed(3)})`);
+              outCtx.fillStyle = grad;
+              outCtx.fillRect(0, 0, targetW, targetH);
+            }
+            if (post.pixelate >= 2) {
+              applyPixelate(outCtx, targetW, targetH, post.pixelate);
+            }
+
+            await downloadCanvasPng(outCanvas, filename);
+          } finally {
+            restoreRendererSize();
+          }
         } finally {
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
-          activeCamera.clearViewOffset();
-          renderer.setPixelRatio(savedPixelRatio);
-          renderer.setSize(savedCssSize.x, savedCssSize.y, false);
-          if (composer) {
-            const fullW = Math.max(1, Math.round(savedCssSize.x * savedPixelRatio));
-            const fullH = Math.max(1, Math.round(savedCssSize.y * savedPixelRatio));
-            composer.setPixelRatio(savedPixelRatio);
-            composer.setSize(savedCssSize.x, savedCssSize.y);
-            if (bloomPass) bloomPass.resolution.set(fullW, fullH);
-            if (studioPass) studioPass.uniforms.uResolution.value.set(fullW, fullH);
-          }
+          isExporting = false;
+          renderDirty = false;
           drawFrame();
+          if (resumeLoopAfterExport && needsContinuousLoop()) {
+            isLoopRunning = true;
+            lastTime = performance.now();
+            if (isSoftwareGl) afterDraw(tick);
+            else frameId = requestAnimationFrame(tick);
+          }
         }
       };
+
+      /** 2D fallback for the retro pixel filter on tiled exports. */
+      function applyPixelate(
+        ctx: CanvasRenderingContext2D,
+        w: number,
+        h: number,
+        block: number,
+      ) {
+        const small = document.createElement('canvas');
+        small.width = Math.max(1, Math.round(w / block));
+        small.height = Math.max(1, Math.round(h / block));
+        const smallCtx = small.getContext('2d')!;
+        smallCtx.imageSmoothingEnabled = true;
+        smallCtx.drawImage(ctx.canvas, 0, 0, small.width, small.height);
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(small, 0, 0, w, h);
+        ctx.imageSmoothingEnabled = true;
+      }
 
       engineRef.current = {
         applyPreset,
@@ -1366,8 +1585,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         renderer.compile(scene, activeCamera);
       }
 
+      let lastDevicePixelRatio = window.devicePixelRatio || 1;
+      const targetPixelRatio = () =>
+        isSoftwareGl ? 1 : Math.min(window.devicePixelRatio || 1, 2);
+
       const handleResize = () => {
         if (!container) return;
+        lastCanvasRect = null;
         const w = container.clientWidth || window.innerWidth;
         const h = container.clientHeight || window.innerHeight;
         const asp = w / Math.max(1, h);
@@ -1380,18 +1604,51 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         orthoCamera.right = halfH * asp;
         orthoCamera.updateProjectionMatrix();
 
+        // Moving the window between monitors with different scale factors does
+        // not always fire `resize`; recompute the ratio so the canvas stays sharp.
+        const dpr = targetPixelRatio();
+        if (dpr !== lastDevicePixelRatio) {
+          lastDevicePixelRatio = dpr;
+          renderer.setPixelRatio(dpr);
+          if (composer) composer.setPixelRatio(dpr);
+        }
+
         renderer.setSize(w, h);
         if (composer) composer.setSize(w, h);
-        if (bloomPass) bloomPass.resolution.set(w, h);
-        if (studioPass) studioPass.uniforms.uResolution.value.set(w, h);
+        const pixelW = Math.max(1, Math.round(w * dpr));
+        const pixelH = Math.max(1, Math.round(h * dpr));
+        if (bloomPass) bloomPass.resolution.set(pixelW, pixelH);
+        if (studioPass) studioPass.uniforms.uResolution.value.set(pixelW, pixelH);
         requestRender();
       };
       window.addEventListener('resize', handleResize);
+      window.addEventListener('orientationchange', handleResize);
+      const invalidateCanvasRect = () => {
+        lastCanvasRect = null;
+      };
+      window.addEventListener('scroll', invalidateCanvasRect, true);
+
+      // Some browsers expose DPR changes only through `matchMedia` resolution
+      // queries; re-run the resize handler when it flips.
+      let dprQuery: MediaQueryList | null = null;
+      const watchDevicePixelRatio = () => {
+        dprQuery?.removeEventListener('change', onDprChange);
+        dprQuery = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+        dprQuery.addEventListener('change', onDprChange);
+      };
+      const onDprChange = () => {
+        handleResize();
+        watchDevicePixelRatio();
+      };
+      watchDevicePixelRatio();
 
       return () => {
         cancelAnimationFrame(frameId);
         clearTimeout(frameId);
         window.removeEventListener('resize', handleResize);
+        window.removeEventListener('orientationchange', handleResize);
+        window.removeEventListener('scroll', invalidateCanvasRect, true);
+        dprQuery?.removeEventListener('change', onDprChange);
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('keyup', onKeyUp);
         window.removeEventListener('blur', onWindowBlur);
@@ -1434,7 +1691,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         baseGeo.dispose();
         baseMat.dispose();
         envTex.dispose();
+        // EffectComposer.dispose() only frees its own render targets; passes own
+        // theirs (UnrealBloomPass keeps a full mip chain) and RoomEnvironment owns
+        // its geometries/materials.
+        bloomPass?.dispose();
+        studioPass?.dispose();
+        renderPass?.dispose();
         if (composer) composer.dispose();
+        roomEnvironment.dispose();
         renderer.dispose();
         if (renderer.domElement.parentNode === container) {
           container.removeChild(renderer.domElement);

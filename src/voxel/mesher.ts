@@ -552,18 +552,21 @@ export function buildVoxelGeometry(
 
   const vCount = quadCount * 4;
   const iCount = quadCount * 6;
+  // `.slice()` (not `.subarray()`) so the GPU upload does not pin the whole
+  // doubled scratch allocation: a buffer that grew to 2x capacity would
+  // otherwise retain twice the memory it actually needs.
   const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(posArr.subarray(0, vCount * 3), 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(normArr.subarray(0, vCount * 3), 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colArr.subarray(0, vCount * 3), 3));
-  geometry.setAttribute('aAo', new THREE.BufferAttribute(aoArr.subarray(0, vCount), 1));
+  geometry.setAttribute('position', new THREE.BufferAttribute(posArr.slice(0, vCount * 3), 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normArr.slice(0, vCount * 3), 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(colArr.slice(0, vCount * 3), 3));
+  geometry.setAttribute('aAo', new THREE.BufferAttribute(aoArr.slice(0, vCount), 1));
 
   if (vCount <= 65535) {
     const smallIdx = new Uint16Array(iCount);
     for (let i = 0; i < iCount; i++) smallIdx[i] = idxArr[i];
     geometry.setIndex(new THREE.BufferAttribute(smallIdx, 1));
   } else {
-    geometry.setIndex(new THREE.BufferAttribute(idxArr.subarray(0, iCount), 1));
+    geometry.setIndex(new THREE.BufferAttribute(idxArr.slice(0, iCount), 1));
   }
 
   geometry.computeBoundingBox();
