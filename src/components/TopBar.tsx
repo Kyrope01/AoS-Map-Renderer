@@ -6,12 +6,10 @@ import {
   PanelRightClose,
   PanelRightOpen,
   RotateCcw,
-  Sparkles,
 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import {
   computeUpscaledDimensions,
-  formatResolutionLabel,
   getMaxExportWidth,
 } from '../voxel/exportResolution';
 import { CameraMode, MeshStats } from '../voxel/types';
@@ -46,6 +44,9 @@ export function TopBar({
     height: 900,
   });
   const [upscaleWidth, setUpscaleWidth] = useState<number>(3840);
+  const [isEditingRes, setIsEditingRes] = useState(false);
+  const [customInputVal, setCustomInputVal] = useState('');
+  const customInputRef = useRef<HTMLInputElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
 
   const surfaceClass = 'bg-[#14171D]/92 text-[#F3F1EC] border-white/10';
@@ -56,10 +57,14 @@ export function TopBar({
     const onPointerDown = (e: PointerEvent) => {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setExportOpen(false);
+        setIsEditingRes(false);
       }
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExportOpen(false);
+      if (e.key === 'Escape') {
+        setExportOpen(false);
+        setIsEditingRes(false);
+      }
     };
     window.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('keydown', onKeyDown);
@@ -77,20 +82,22 @@ export function TopBar({
       setUpscaleWidth((prev) =>
         Math.min(maxW, Math.max(current.width, prev || Math.min(maxW, current.width * 2))),
       );
+      setIsEditingRes(false);
     }
     setExportOpen((prev) => !prev);
   };
 
   const maxExportWidth = getMaxExportWidth(baseRes.width, baseRes.height);
-  const clampedSliderVal = Math.min(maxExportWidth, Math.max(baseRes.width, upscaleWidth));
+  const minSliderVal = Math.min(baseRes.width, upscaleWidth);
+  const clampedSliderVal = Math.min(maxExportWidth, Math.max(minSliderVal, upscaleWidth));
   const upscaledDims = computeUpscaledDimensions(
     baseRes.width,
     baseRes.height,
     clampedSliderVal,
   );
   const sliderPct =
-    maxExportWidth > baseRes.width
-      ? ((clampedSliderVal - baseRes.width) / (maxExportWidth - baseRes.width)) * 100
+    maxExportWidth > minSliderVal
+      ? ((clampedSliderVal - minSliderVal) / (maxExportWidth - minSliderVal)) * 100
       : 100;
 
   const triggerExport = async (targetWidth?: number) => {
@@ -101,6 +108,22 @@ export function TopBar({
       setExportOpen(false);
     } finally {
       setIsExporting(false);
+    }
+  };
+
+  const commitCustomRes = () => {
+    setIsEditingRes(false);
+    const trimmed = customInputVal.trim().toLowerCase();
+    let targetW = 0;
+    if (trimmed === '4k') targetW = 3840;
+    else if (trimmed === '8k') targetW = 7680;
+    else if (trimmed === '16k') targetW = 15360;
+    else {
+      const match = trimmed.match(/(\d+)/);
+      if (match) targetW = parseInt(match[1], 10);
+    }
+    if (targetW > 0) {
+      setUpscaleWidth(Math.min(maxExportWidth, Math.max(64, targetW)));
     }
   };
 
@@ -175,8 +198,9 @@ export function TopBar({
                 <div
                   role="menu"
                   aria-label="Export PNG Options"
-                  className="absolute right-0 top-full mt-2 w-64 p-2.5 rounded-lg border border-white/12 bg-[#14171D]/96 text-[#F3F1EC] shadow-2xl space-y-2.5 z-30"
+                  className="absolute right-0 top-full mt-2 w-72 p-2 rounded-lg border border-white/12 bg-[#14171D]/96 text-[#F3F1EC] shadow-2xl space-y-2 z-30"
                 >
+                  {/* Export PNG: subtle dark button without icons, name on left, resolution on right */}
                   <button
                     type="button"
                     role="menuitem"
@@ -184,45 +208,31 @@ export function TopBar({
                     onClick={() => void triggerExport()}
                     className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-left transition-colors cursor-pointer disabled:opacity-50"
                   >
-                    <span className="flex items-center gap-2 text-xs font-semibold">
-                      <Camera className="w-3.5 h-3.5 text-[#E05A2B]" aria-hidden="true" />
-                      <span>Export PNG</span>
-                    </span>
+                    <span className="text-xs font-semibold text-[#F3F1EC]">Export PNG</span>
                     <span className="font-mono-tabular text-[10px] text-[#8F98A6]">
                       {baseRes.width}×{baseRes.height}
                     </span>
                   </button>
 
-                  <div className="border-t border-white/10 pt-2.5 space-y-2">
+                  {/* Export Upscaled: looks just like Export PNG button with integrated slider & editable resolution */}
+                  <div className="w-full rounded-md border border-white/10 bg-white/5 p-2.5 space-y-2">
                     <button
                       type="button"
                       role="menuitem"
                       disabled={isExporting}
                       onClick={() => void triggerExport(upscaledDims.width)}
-                      className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-md bg-[#E05A2B] hover:bg-[#C94D22] text-white text-left transition-colors cursor-pointer disabled:opacity-50"
+                      className="w-full flex items-center justify-between text-left transition-colors cursor-pointer disabled:opacity-50 group"
                     >
-                      <span className="flex items-center gap-2 text-xs font-semibold">
-                        <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
-                        <span>{isExporting ? 'Rendering...' : 'Export Upscaled'}</span>
-                      </span>
-                      <span className="font-mono-tabular text-[10px] text-white/90">
-                        {formatResolutionLabel(upscaledDims.width, upscaledDims.height)}
+                      <span className="text-xs font-semibold text-[#F3F1EC] group-hover:text-[#E05A2B] transition-colors">
+                        {isExporting ? 'Exporting...' : 'Export Upscaled'}
                       </span>
                     </button>
 
-                    <div className="px-0.5 space-y-1">
-                      <div className="flex items-center justify-between text-[10px]">
-                        <label htmlFor="export-upscale-slider" className="font-medium text-[#B8C0CC]">
-                          Target Resolution
-                        </label>
-                        <span className="font-mono-tabular text-[#8992A2]">
-                          {upscaledDims.scale.toFixed(1)}×
-                        </span>
-                      </div>
+                    <div className="flex items-center gap-2">
                       <input
                         id="export-upscale-slider"
                         type="range"
-                        min={baseRes.width}
+                        min={minSliderVal}
                         max={maxExportWidth}
                         step={16}
                         value={clampedSliderVal}
@@ -230,12 +240,37 @@ export function TopBar({
                         style={{
                           background: `linear-gradient(to right, #E05A2B ${sliderPct}%, rgba(255,255,255,0.15) ${sliderPct}%)`,
                         }}
-                        className="studio-slider w-full"
+                        className="studio-slider flex-1 min-w-0"
+                        aria-label="Upscale resolution slider"
                       />
-                      <div className="flex items-center justify-between font-mono-tabular text-[9px] text-[#7D8594]">
-                        <span>Display ({baseRes.width}w)</span>
-                        <span>16K ({maxExportWidth}w)</span>
-                      </div>
+                      {isEditingRes ? (
+                        <input
+                          ref={customInputRef}
+                          type="text"
+                          value={customInputVal}
+                          onChange={(e) => setCustomInputVal(e.target.value)}
+                          onBlur={commitCustomRes}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitCustomRes();
+                            if (e.key === 'Escape') setIsEditingRes(false);
+                          }}
+                          className="w-22 px-1 py-0.5 text-right font-mono-tabular text-[10px] bg-black/60 border border-[#E05A2B] rounded text-white focus:outline-none"
+                          autoFocus
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setCustomInputVal(`${upscaledDims.width}×${upscaledDims.height}`);
+                            setIsEditingRes(true);
+                          }}
+                          title="Click to type custom resolution"
+                          className="font-mono-tabular text-[10px] text-[#A6AEBC] hover:text-white cursor-text shrink-0 text-right px-1 py-0.5 rounded hover:bg-white/10 transition-colors"
+                        >
+                          {upscaledDims.width}×{upscaledDims.height}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
