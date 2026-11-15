@@ -10,11 +10,24 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { BuiltVoxelMesh } from '../voxel/mesher';
 import {
+  computePlayerPoseTransforms,
+  disposePlayerModelGeometryCache,
+  getPlayerPartGeometry,
+  selectPlayerPartKeys,
+} from '../voxel/playerModel';
+import {
   canUseSinglePassExport,
   computeExportTiles,
   computeUpscaledDimensions,
 } from '../voxel/exportResolution';
-import { CameraPreset, MAX_VOXEL_LIGHTS, RenderSettings, VoxelGrid, VoxelLight } from '../voxel/types';
+import {
+  CameraPreset,
+  MAX_VOXEL_LIGHTS,
+  RenderSettings,
+  SpawnedPlayer,
+  VoxelGrid,
+  VoxelLight,
+} from '../voxel/types';
 import { sortVoxelLightsByIntensity, updateVoxelLightTexture } from './voxelLightTexture';
 import {
   createVoxelShadowTexture,
@@ -46,6 +59,12 @@ export interface VoxelViewportHandle {
     y: number,
     z: number,
   ) => { x: number; y: number; visible: boolean };
+  /** Projects a Three.js world-space coordinate to viewport-relative CSS pixels. */
+  projectWorldToScreen: (
+    x: number,
+    y: number,
+    z: number,
+  ) => { x: number; y: number; visible: boolean };
 }
 
 export interface PrecomputedShadowData {
@@ -66,6 +85,15 @@ interface VoxelViewportProps {
   voxelLights: VoxelLight[];
   pickingMode: boolean;
   onVoxelPicked: (x: number, y: number, z: number, normal: [number, number, number]) => void;
+  spawnedPlayers: SpawnedPlayer[];
+  selectedPlayerId: string | null;
+  placingPlayer: boolean;
+  movingPlayerId: string | null;
+  onPlacePlayer: (x: number, y: number, z: number) => void;
+  onMovePlayer: (id: string, x: number, y: number, z: number) => void;
+  onSelectPlayer: (id: string | null) => void;
+  /** Called synchronously after every live WebGL frame draw (for zero-lag UI anchors). */
+  onFrameRendered?: () => void;
 }
 
 function createContactShadowTexture(): THREE.CanvasTexture {
@@ -104,7 +132,27 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
   function VoxelViewport(
-    { builtMesh, voxelGrid, precomputedShadow, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, onDisableAutoRotate, voxelLights, pickingMode, onVoxelPicked },
+    {
+      builtMesh,
+      voxelGrid,
+      precomputedShadow,
+      onShadowWarning,
+      settings,
+      onFileDrop,
+      onAdjustFlySpeed,
+      onDisableAutoRotate,
+      voxelLights,
+      pickingMode,
+      onVoxelPicked,
+      spawnedPlayers,
+      selectedPlayerId,
+      placingPlayer,
+      movingPlayerId,
+      onPlacePlayer,
+      onMovePlayer,
+      onSelectPlayer,
+      onFrameRendered,
+    },
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
@@ -128,6 +176,22 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
     pickingModeRef.current = pickingMode;
     const onVoxelPickedRef = useRef(onVoxelPicked);
     onVoxelPickedRef.current = onVoxelPicked;
+    const spawnedPlayersRef = useRef(spawnedPlayers);
+    spawnedPlayersRef.current = spawnedPlayers;
+    const selectedPlayerIdRef = useRef(selectedPlayerId);
+    selectedPlayerIdRef.current = selectedPlayerId;
+    const placingPlayerRef = useRef(placingPlayer);
+    placingPlayerRef.current = placingPlayer;
+    const movingPlayerIdRef = useRef(movingPlayerId);
+    movingPlayerIdRef.current = movingPlayerId;
+    const onPlacePlayerRef = useRef(onPlacePlayer);
+    onPlacePlayerRef.current = onPlacePlayer;
+    const onMovePlayerRef = useRef(onMovePlayer);
+    onMovePlayerRef.current = onMovePlayer;
+    const onSelectPlayerRef = useRef(onSelectPlayer);
+    onSelectPlayerRef.current = onSelectPlayer;
+    const onFrameRenderedRef = useRef(onFrameRendered);
+    onFrameRenderedRef.current = onFrameRendered;
 
     const [contextLost, setContextLost] = useState(false);
     const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -137,11 +201,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       syncMesh: (meshData: BuiltVoxelMesh | null, instantCamera?: boolean) => void;
       syncSettings: () => void;
       syncVoxelLights: () => void;
+      syncPlayers: () => void;
       syncVoxelGrid: (grid: VoxelGrid | null) => void;
       getDisplayResolution: () => { width: number; height: number };
       getMaxTextureSize: () => number;
       exportPng: (filename: string, targetWidth?: number) => Promise<void>;
       projectVoxelToScreen: (
+        x: number,
+        y: number,
+        z: number,
+      ) => { x: number; y: number; visible: boolean };
+      projectWorldToScreen: (
         x: number,
         y: number,
         z: number,
@@ -169,6 +239,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       },
       projectVoxelToScreen: (x: number, y: number, z: number) => {
         if (engineRef.current) return engineRef.current.projectVoxelToScreen(x, y, z);
+        return { x: 0, y: 0, visible: false };
+      },
+      projectWorldToScreen: (x: number, y: number, z: number) => {
+        if (engineRef.current) return engineRef.current.projectWorldToScreen(x, y, z);
         return { x: 0, y: 0, visible: false };
       },
     }));
@@ -525,6 +599,185 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       hoverBox.frustumCulled = false;
       scene.add(hoverBox);
 
+      // --- Spawned Player Models (Special Effects, .vxl maps only) --------
+      const playersGroup = new THREE.Group();
+      playersGroup.name = 'spawned-player-models';
+      scene.add(playersGroup);
+
+      const playerHelperGroup = new THREE.Group();
+      playerHelperGroup.name = 'player-editor-helpers';
+      scene.add(playerHelperGroup);
+
+      const selectionRingGeo = new THREE.RingGeometry(0.68, 0.84, 32);
+      selectionRingGeo.rotateX(-Math.PI / 2);
+      const selectionRingMat = new THREE.MeshBasicMaterial({
+        color: '#E05A2B',
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        transparent: true,
+        opacity: 0.92,
+        depthWrite: false,
+      });
+      const playerSelectionRing = new THREE.Mesh(selectionRingGeo, selectionRingMat);
+      playerSelectionRing.visible = false;
+      playerSelectionRing.renderOrder = 5;
+      playerHelperGroup.add(playerSelectionRing);
+
+      const placementRingGeo = new THREE.RingGeometry(0.55, 0.72, 28);
+      placementRingGeo.rotateX(-Math.PI / 2);
+      const placementRingMat = new THREE.MeshBasicMaterial({
+        color: '#F59E0B',
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        transparent: true,
+        opacity: 0.85,
+        depthWrite: false,
+      });
+      const playerPlacementRing = new THREE.Mesh(placementRingGeo, placementRingMat);
+      playerPlacementRing.visible = false;
+      playerPlacementRing.renderOrder = 5;
+      playerHelperGroup.add(playerPlacementRing);
+
+      const syncPlayers = () => {
+        const players = spawnedPlayersRef.current;
+        const activeMat = materials[settingsRef.current.shaderMode];
+        const isVxl = builtMeshRef.current?.format === 'vxl';
+
+        // Rebuild child groups cleanly from cached geometries (BufferGeometry stays cached).
+        while (playersGroup.children.length > 0) {
+          playersGroup.remove(playersGroup.children[0]);
+        }
+
+        if (!isVxl || players.length === 0) {
+          playerSelectionRing.visible = false;
+          if (!placingPlayerRef.current && !movingPlayerIdRef.current) {
+            playerPlacementRing.visible = false;
+          }
+          renderer.shadowMap.needsUpdate = true;
+          requestRender();
+          return;
+        }
+
+        const assignPlayerPartMesh = (
+          geo: THREE.BufferGeometry,
+          playerId: string,
+          pos: [number, number, number],
+          rotX: number,
+          rotY: number,
+          scale: number,
+        ): THREE.Mesh => {
+          const mesh = new THREE.Mesh(geo, activeMat);
+          mesh.castShadow = !isSoftwareGl;
+          mesh.receiveShadow = !isSoftwareGl;
+          mesh.position.set(pos[0], pos[1], pos[2]);
+          mesh.rotation.set(rotX, rotY, 0, 'YXZ');
+          mesh.scale.setScalar(scale);
+          mesh.userData.playerId = playerId;
+          return mesh;
+        };
+
+        let selectedPlayer: SpawnedPlayer | null = null;
+        for (const p of players) {
+          if (p.id === selectedPlayerIdRef.current) {
+            selectedPlayer = p;
+          }
+          const root = new THREE.Group();
+          root.name = `player-${p.id}`;
+          root.userData.playerId = p.id;
+          root.position.set(p.x, p.y, p.z);
+          root.rotation.set(0, -THREE.MathUtils.degToRad(p.yaw), 0);
+
+          const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
+          const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+
+          const legLeftMesh = assignPlayerPartMesh(
+            getPlayerPartGeometry(parts.legLeft, p.teamColor),
+            p.id,
+            pose.legLeft.position,
+            pose.legLeft.rotationX,
+            pose.legLeft.rotationY,
+            pose.legLeft.scale,
+          );
+          const legRightMesh = assignPlayerPartMesh(
+            getPlayerPartGeometry(parts.legRight, p.teamColor),
+            p.id,
+            pose.legRight.position,
+            pose.legRight.rotationX,
+            pose.legRight.rotationY,
+            pose.legRight.scale,
+          );
+          const torsoMesh = assignPlayerPartMesh(
+            getPlayerPartGeometry(parts.torso, p.teamColor),
+            p.id,
+            pose.torso.position,
+            pose.torso.rotationX,
+            pose.torso.rotationY,
+            pose.torso.scale,
+          );
+          const headMesh = assignPlayerPartMesh(
+            getPlayerPartGeometry(parts.head, p.teamColor),
+            p.id,
+            pose.head.position,
+            pose.head.rotationX,
+            pose.head.rotationY,
+            pose.head.scale,
+          );
+
+          // Arms + held weapon/tool share the arms shoulder pivot so aiming/sprinting moves both together.
+          const armsPivot = new THREE.Group();
+          armsPivot.position.set(
+            pose.arms.position[0],
+            pose.arms.position[1],
+            pose.arms.position[2],
+          );
+          armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
+          armsPivot.userData.playerId = p.id;
+
+          const armsMesh = assignPlayerPartMesh(
+            getPlayerPartGeometry(parts.arms, p.teamColor),
+            p.id,
+            [0, 0, 0],
+            0,
+            pose.arms.rotationY,
+            pose.arms.scale,
+          );
+          const toolGeo =
+            p.weapon === 'block'
+              ? getPlayerPartGeometry(parts.tool, p.blockColor)
+              : getPlayerPartGeometry(parts.tool);
+          const toolMesh = assignPlayerPartMesh(
+            toolGeo,
+            p.id,
+            pose.toolInArms.position,
+            pose.toolInArms.rotationX,
+            pose.toolInArms.rotationY,
+            pose.toolInArms.scale,
+          );
+          armsPivot.add(armsMesh, toolMesh);
+
+          root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot);
+          playersGroup.add(root);
+        }
+
+        if (selectedPlayer) {
+          playerSelectionRing.position.set(
+            selectedPlayer.x,
+            selectedPlayer.y + 0.04,
+            selectedPlayer.z,
+          );
+          playerSelectionRing.visible = true;
+        } else {
+          playerSelectionRing.visible = false;
+        }
+
+        if (!placingPlayerRef.current && !movingPlayerIdRef.current) {
+          playerPlacementRing.visible = false;
+        }
+
+        renderer.shadowMap.needsUpdate = true;
+        requestRender();
+      };
+
       const raycaster = new THREE.Raycaster();
       const pointerNdc = new THREE.Vector2();
       const hitPoint = new THREE.Vector3();
@@ -627,11 +880,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       const projectedScratch = new THREE.Vector3();
       let lastCanvasRect: DOMRect | null = null;
-      const projectVoxelToScreen = (x: number, y: number, z: number) => {
+      const projectWorldToScreen = (x: number, y: number, z: number) => {
         // Cached rect: the panel probes this every animation frame and a layout
         // read per frame is what actually costs here.
         const rect = lastCanvasRect ?? (lastCanvasRect = renderer.domElement.getBoundingClientRect());
-        voxelToWorld(x, y, z, projectedScratch);
+        projectedScratch.set(x, y, z);
         const projected = projectedScratch.project(activeCamera);
         const visible =
           projected.z > -1 && projected.z < 1 &&
@@ -642,6 +895,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           y: rect.top + ((1 - projected.y) / 2) * rect.height,
           visible,
         };
+      };
+
+      const projectVoxelToScreen = (x: number, y: number, z: number) => {
+        voxelToWorld(x, y, z, markerPosition);
+        return projectWorldToScreen(markerPosition.x, markerPosition.y, markerPosition.z);
       };
 
       // Post-Processing Composer (GPU only; crisp high-threshold bloom)
@@ -740,6 +998,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         skyMesh.position.copy(activeCamera.position);
         if (composer && !isSoftwareGl) composer.render();
         else renderer.render(scene, activeCamera);
+        if (!isExporting) {
+          onFrameRenderedRef.current?.();
+        }
       };
 
       // Software GL (SwiftShader / llvmpipe) renders on the CPU, so waiting for the
@@ -1028,40 +1289,221 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const onWindowBlur = () => {
         keysDown.clear();
         isFreeDragging = false;
+        if (draggingPlayerId) {
+          draggingPlayerId = null;
+          controls.enabled = settingsRef.current.cameraMode === 'orbit';
+        }
       };
 
-      // Voxel-light picking: click (not drag) selects a voxel while picking.
+      // Voxel-light picking, player placement, click-on/off selection, and player drag-to-move.
       let pickDownX = 0;
       let pickDownY = 0;
-      const onPickPointerDown = (e: PointerEvent) => {
+      let pointerDownHitPlayerId: string | null = null;
+      let draggingPlayerId: string | null = null;
+      let dragPlaneY = 0;
+      const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+      const dragPlaneHit = new THREE.Vector3();
+
+      const setRaycasterFromClient = (clientX: number, clientY: number): boolean => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return false;
+        pointerNdc.set(
+          ((clientX - rect.left) / rect.width) * 2 - 1,
+          -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        raycaster.setFromCamera(pointerNdc, activeCamera);
+        return true;
+      };
+
+      const pickPlayerIdAt = (clientX: number, clientY: number): string | null => {
+        if (playersGroup.children.length === 0) return null;
+        if (!setRaycasterFromClient(clientX, clientY)) return null;
+        const hits = raycaster.intersectObjects(playersGroup.children, true);
+        for (const h of hits) {
+          const id = h.object.userData.playerId as string | undefined;
+          if (id) return id;
+        }
+        return null;
+      };
+
+      const clampWorldXZ = (wx: number, wz: number): [number, number] => {
+        const halfW = Math.max(1, gridSize.x * 0.5 - 0.5);
+        const halfD = Math.max(1, gridSize.z * 0.5 - 0.5);
+        return [
+          THREE.MathUtils.clamp(wx, -halfW, halfW),
+          THREE.MathUtils.clamp(wz, -halfD, halfD),
+        ];
+      };
+
+      // Capture-phase handler intercepts left-button down on an existing player
+      // before OrbitControls can start orbiting, enabling direct drag-to-move.
+      const onPlayerCapturePointerDown = (e: PointerEvent) => {
         pickDownX = e.clientX;
         pickDownY = e.clientY;
+        pointerDownHitPlayerId = null;
+        draggingPlayerId = null;
+
+        if (e.button !== 0) return;
+        if (pickingModeRef.current || placingPlayerRef.current || movingPlayerIdRef.current) {
+          return;
+        }
+
+        const hitId = pickPlayerIdAt(e.clientX, e.clientY);
+        if (hitId) {
+          pointerDownHitPlayerId = hitId;
+          if (settingsRef.current.cameraMode === 'orbit') {
+            draggingPlayerId = hitId;
+            const targetPlayer = spawnedPlayersRef.current.find((p) => p.id === hitId);
+            dragPlaneY = targetPlayer ? targetPlayer.y : 0;
+            dragPlane.constant = -dragPlaneY;
+            controls.enabled = false;
+            onSelectPlayerRef.current(hitId);
+            renderer.domElement.setPointerCapture(e.pointerId);
+          }
+        }
       };
+
       const onPickPointerUp = (e: PointerEvent) => {
-        if (!pickingModeRef.current) return;
         if (e.button !== 0) return;
         const moved = Math.hypot(e.clientX - pickDownX, e.clientY - pickDownY);
-        if (moved > 6) return;
-        pickVoxelAt(e.clientX, e.clientY);
+
+        if (draggingPlayerId) {
+          draggingPlayerId = null;
+          controls.enabled = settingsRef.current.cameraMode === 'orbit';
+          if (renderer.domElement.hasPointerCapture(e.pointerId)) {
+            renderer.domElement.releasePointerCapture(e.pointerId);
+          }
+          if (moved <= 6 && pointerDownHitPlayerId) {
+            onSelectPlayerRef.current(pointerDownHitPlayerId);
+          }
+          pointerDownHitPlayerId = null;
+          return;
+        }
+
+        if (moved > 6) {
+          pointerDownHitPlayerId = null;
+          return;
+        }
+
+        if (pickingModeRef.current) {
+          pickVoxelAt(e.clientX, e.clientY);
+          return;
+        }
+
+        if (placingPlayerRef.current) {
+          if (voxelMesh.visible && setRaycasterFromClient(e.clientX, e.clientY)) {
+            const hit = firstVisibleHit();
+            if (hit) {
+              const [wx, wz] = clampWorldXZ(hit.point.x, hit.point.z);
+              onPlacePlayerRef.current(
+                Math.round(wx * 100) / 100,
+                Math.round(hit.point.y * 100) / 100,
+                Math.round(wz * 100) / 100,
+              );
+              playerPlacementRing.visible = false;
+              requestRender();
+            }
+          }
+          return;
+        }
+
+        const movingId = movingPlayerIdRef.current;
+        if (movingId) {
+          if (voxelMesh.visible && setRaycasterFromClient(e.clientX, e.clientY)) {
+            const hit = firstVisibleHit();
+            if (hit) {
+              const [wx, wz] = clampWorldXZ(hit.point.x, hit.point.z);
+              onMovePlayerRef.current(
+                movingId,
+                Math.round(wx * 100) / 100,
+                Math.round(hit.point.y * 100) / 100,
+                Math.round(wz * 100) / 100,
+              );
+              playerPlacementRing.visible = false;
+              requestRender();
+            }
+          }
+          return;
+        }
+
+        // Standard click: select hit player or click off to hide the floating panel.
+        const hitId = pointerDownHitPlayerId ?? pickPlayerIdAt(e.clientX, e.clientY);
+        pointerDownHitPlayerId = null;
+        if (hitId) {
+          onSelectPlayerRef.current(hitId);
+        } else if (selectedPlayerIdRef.current !== null) {
+          onSelectPlayerRef.current(null);
+        }
       };
+
       const onPickPointerMove = (e: PointerEvent) => {
-        if (!pickingModeRef.current) return;
-        updateHoverAt(e.clientX, e.clientY);
-        requestRender();
+        if (draggingPlayerId) {
+          if (!setRaycasterFromClient(e.clientX, e.clientY)) return;
+          const hit = voxelMesh.visible ? firstVisibleHit() : null;
+          if (hit && hit.face && hit.face.normal.y > 0.25) {
+            const [wx, wz] = clampWorldXZ(hit.point.x, hit.point.z);
+            dragPlaneY = hit.point.y;
+            dragPlane.constant = -dragPlaneY;
+            onMovePlayerRef.current(
+              draggingPlayerId,
+              Math.round(wx * 100) / 100,
+              Math.round(hit.point.y * 100) / 100,
+              Math.round(wz * 100) / 100,
+            );
+          } else if (raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) {
+            const [wx, wz] = clampWorldXZ(dragPlaneHit.x, dragPlaneHit.z);
+            onMovePlayerRef.current(
+              draggingPlayerId,
+              Math.round(wx * 100) / 100,
+              Math.round(dragPlaneY * 100) / 100,
+              Math.round(wz * 100) / 100,
+            );
+          }
+          return;
+        }
+
+        if (pickingModeRef.current) {
+          updateHoverAt(e.clientX, e.clientY);
+          requestRender();
+          return;
+        }
+
+        if (placingPlayerRef.current || movingPlayerIdRef.current) {
+          if (!voxelMesh.visible || !setRaycasterFromClient(e.clientX, e.clientY)) {
+            playerPlacementRing.visible = false;
+            return;
+          }
+          const hit = firstVisibleHit();
+          if (hit) {
+            const [wx, wz] = clampWorldXZ(hit.point.x, hit.point.z);
+            playerPlacementRing.position.set(wx, hit.point.y + 0.05, wz);
+            playerPlacementRing.visible = true;
+          } else {
+            playerPlacementRing.visible = false;
+          }
+          requestRender();
+        }
       };
+
       const onPickPointerLeave = () => {
         if (hoverBox.visible) {
           hoverBox.visible = false;
           requestRender();
         }
+        if (playerPlacementRing.visible) {
+          playerPlacementRing.visible = false;
+          requestRender();
+        }
       };
 
+      renderer.domElement.addEventListener('pointerdown', onPlayerCapturePointerDown, {
+        capture: true,
+      });
       renderer.domElement.addEventListener('pointerdown', onPointerDown);
       renderer.domElement.addEventListener('contextmenu', onContextMenu);
       renderer.domElement.addEventListener('pointermove', onPointerMove);
       renderer.domElement.addEventListener('pointerup', onPointerUp);
       renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
-      renderer.domElement.addEventListener('pointerdown', onPickPointerDown);
       renderer.domElement.addEventListener('pointerup', onPickPointerUp);
       renderer.domElement.addEventListener('pointermove', onPickPointerMove);
       renderer.domElement.addEventListener('pointerleave', onPickPointerLeave);
@@ -1154,6 +1596,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         renderer.toneMappingExposure = s.exposure;
 
         voxelMesh.material = materials[s.shaderMode];
+        playersGroup.traverse((obj) => {
+          if (obj instanceof THREE.Mesh) {
+            obj.material = materials[s.shaderMode];
+          }
+        });
         materials.pbr.roughness = s.roughness;
         materials.pbr.metalness = s.metalness;
         materials.pbr.clearcoat = s.metalness > 0.35 ? 0.35 : 0.08;
@@ -1361,11 +1808,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         }
         frameId = 0;
 
-        // Hide editor-only helpers (light markers, pick highlight) from exports.
+        // Hide editor-only helpers (light markers, pick highlight, player selection ring) from exports.
         const savedMarkerVisible = markerGroup.visible;
         const savedHoverVisible = hoverBox.visible;
+        const savedPlayerHelpersVisible = playerHelperGroup.visible;
         markerGroup.visible = false;
         hoverBox.visible = false;
+        playerHelperGroup.visible = false;
 
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
@@ -1502,6 +1951,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         } finally {
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
+          playerHelperGroup.visible = savedPlayerHelpersVisible;
           isExporting = false;
           renderDirty = false;
           drawFrame();
@@ -1537,17 +1987,20 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         syncMesh,
         syncSettings,
         syncVoxelLights,
+        syncPlayers,
         syncVoxelGrid,
         getDisplayResolution,
         getMaxTextureSize: () => renderer.capabilities.maxTextureSize || 4096,
         exportPng,
         projectVoxelToScreen,
+        projectWorldToScreen,
       };
 
       if (builtMeshRef.current) {
         syncMesh(builtMeshRef.current, true);
         syncVoxelGrid(voxelGridRef.current);
         syncVoxelLights();
+        syncPlayers();
       } else {
         syncSettings();
         applyPreset('low', true);
@@ -1624,12 +2077,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         window.removeEventListener('keydown', onKeyDown);
         window.removeEventListener('keyup', onKeyUp);
         window.removeEventListener('blur', onWindowBlur);
+        renderer.domElement.removeEventListener('pointerdown', onPlayerCapturePointerDown, {
+          capture: true,
+        });
         renderer.domElement.removeEventListener('pointerdown', onPointerDown);
         renderer.domElement.removeEventListener('contextmenu', onContextMenu);
         renderer.domElement.removeEventListener('pointermove', onPointerMove);
         renderer.domElement.removeEventListener('pointerup', onPointerUp);
         renderer.domElement.removeEventListener('wheel', onWheel);
-        renderer.domElement.removeEventListener('pointerdown', onPickPointerDown);
         renderer.domElement.removeEventListener('pointerup', onPickPointerUp);
         renderer.domElement.removeEventListener('pointermove', onPickPointerMove);
         renderer.domElement.removeEventListener('pointerleave', onPickPointerLeave);
@@ -1639,6 +2094,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
 
         voxelMesh.geometry.dispose();
+        selectionRingGeo.dispose();
+        selectionRingMat.dispose();
+        placementRingGeo.dispose();
+        placementRingMat.dispose();
+        disposePlayerModelGeometryCache();
         markers.dispose();
         markerGeo.dispose();
         markerMaterial.dispose();
@@ -1703,6 +2163,12 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       }
     }, [pickingMode]);
 
+    useEffect(() => {
+      engineRef.current?.syncPlayers();
+    }, [spawnedPlayers, selectedPlayerId, placingPlayer, movingPlayerId]);
+
+    const isCrosshairMode = pickingMode || placingPlayer || movingPlayerId !== null;
+
     return (
       <div
         className="relative w-full h-full overflow-hidden"
@@ -1723,7 +2189,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         <div
           ref={mountRef}
           data-testid="voxel-canvas-mount"
-          className={`w-full h-full ${pickingMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+          className={`w-full h-full ${isCrosshairMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
         />
 
         {contextLost && (

@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test src/voxel/voxel.test.ts src/renderer/shaders.test.ts src/renderer/slice.test.ts",
+    "test": "tsx --test src/voxel/voxel.test.ts src/voxel/playerModel.test.ts src/renderer/shaders.test.ts src/renderer/slice.test.ts",
     "lint:shaders": "tsx scripts/dump-shaders.ts && python3 scripts/check-shaders.py /tmp/shader-out"
   },
   "dependencies": {

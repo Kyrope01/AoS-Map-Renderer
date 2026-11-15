@@ -133,6 +133,35 @@ export interface MeshStats {
   meshMs: number;
 }
 
+export type PlayerStance = 'standing' | 'crouched' | 'sprinting';
+
+export type PlayerWeapon = 'rifle' | 'shotgun' | 'smg' | 'grenade' | 'spade' | 'block';
+
+export type PlayerStyle = 'classic' | 'tactical';
+
+export const MAX_SPAWNED_PLAYERS = 64;
+
+export interface SpawnedPlayer {
+  id: string;
+  /** World X coordinate (Three.js scene space, centered around 0). */
+  x: number;
+  /** World Y coordinate of the player's feet. */
+  y: number;
+  /** World Z coordinate (Three.js scene space, centered around 0). */
+  z: number;
+  /** Facing azimuth in degrees (0..360, 0 faces -Z). */
+  yaw: number;
+  /** Aim / look pitch in degrees (-45..+45). */
+  pitch: number;
+  stance: PlayerStance;
+  weapon: PlayerWeapon;
+  style: PlayerStyle;
+  /** Hex color for player uniform / armor (0,0,0 sentinel in .kv6). */
+  teamColor: string;
+  /** Hex color for held Block tool (0,0,0 sentinel in Block.kv6). */
+  blockColor: string;
+}
+
 export class VoxelParseError extends Error {
   constructor(message: string) {
     super(message);

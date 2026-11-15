@@ -1,6 +1,7 @@
 import {
   Camera,
   CloudSun,
+  Copy,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -14,10 +15,12 @@ import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/
 import {
   BackdropPreset,
   FogMode,
+  MAX_SPAWNED_PLAYERS,
   MAX_VOXEL_LIGHTS,
   MeshStats,
   RenderSettings,
   SliceAxis,
+  SpawnedPlayer,
   VoxelLight,
 } from '../voxel/types';
 
@@ -38,6 +41,14 @@ interface ControlSidebarProps {
   onSelectLight: (id: string | null) => void;
   onRemoveLight: (id: string) => void;
   onClearLights: () => void;
+  spawnedPlayers: SpawnedPlayer[];
+  placingPlayer: boolean;
+  selectedPlayerId: string | null;
+  onStartPlacePlayer: () => void;
+  onSelectPlayer: (id: string | null) => void;
+  onDuplicatePlayer: (id: string) => void;
+  onRemovePlayer: (id: string) => void;
+  onClearPlayers: () => void;
 }
 
 const SUN_SWATCHES = [
@@ -329,9 +340,18 @@ export function ControlSidebar({
   onSelectLight,
   onRemoveLight,
   onClearLights,
+  spawnedPlayers,
+  placingPlayer,
+  selectedPlayerId,
+  onStartPlacePlayer,
+  onSelectPlayer,
+  onDuplicatePlayer,
+  onRemovePlayer,
+  onClearPlayers,
 }: ControlSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('shaders');
   const [lightsOpen, setLightsOpen] = useState(false);
+  const [playersOpen, setPlayersOpen] = useState(false);
 
   const panelSurface = 'bg-[#14171D]/94 text-[#F3F1EC] border-white/10';
   const dividerClass = 'border-white/8';
@@ -345,7 +365,7 @@ export function ControlSidebar({
 
   const tabs: { id: SidebarTab; label: string; icon: typeof Sparkles }[] = [
     { id: 'shaders', label: 'Shaders', icon: Sparkles },
-    { id: 'effects', label: 'Special Effects', icon: Zap },
+    { id: 'effects', label: 'Miscellaneous', icon: Zap },
     { id: 'material', label: 'Material', icon: SlidersHorizontal },
     { id: 'atmosphere', label: 'Sky & Fog', icon: CloudSun },
     { id: 'camera', label: 'Camera', icon: Camera },
@@ -403,7 +423,10 @@ export function ControlSidebar({
       </div>
 
       {/* Tab Switcher */}
-      <div className={`grid grid-cols-5 gap-1 p-1.5 border-b ${dividerClass}`} role="tablist">
+      <div
+        className={`grid grid-cols-[minmax(0,1fr)_minmax(0,1.52fr)_minmax(0,1fr)_minmax(0,1.08fr)_minmax(0,1fr)] gap-1 p-1.5 border-b ${dividerClass}`}
+        role="tablist"
+      >
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isSelected = activeTab === tab.id;
@@ -414,14 +437,14 @@ export function ControlSidebar({
               role="tab"
               aria-selected={isSelected}
               onClick={() => setActiveTab(tab.id)}
-              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer ${
+              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-0.5 rounded-md text-[9.5px] font-medium transition-colors cursor-pointer ${
                 isSelected
                   ? 'bg-[#E05A2B] text-white'
                   : 'text-[#9CA4B3] hover:text-[#F3F1EC] hover:bg-white/7'
               }`}
             >
               <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-              <span className="text-center leading-tight">{tab.label}</span>
+              <span className="text-center leading-tight whitespace-nowrap">{tab.label}</span>
             </button>
           );
         })}
@@ -547,6 +570,153 @@ export function ControlSidebar({
                   </button>
                 </div>
               )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              aria-expanded={playersOpen}
+              onClick={() => setPlayersOpen((open) => !open)}
+              className={`w-full px-3 py-2 rounded-md border text-xs font-semibold transition-colors cursor-pointer ${playersOpen ? activeBtn : inactiveBtn}`}
+            >
+              Player Models
+            </button>
+            {playersOpen && (
+              <div className="p-3 rounded-md border border-white/10 bg-white/5 space-y-2.5">
+                <div className="flex items-center justify-between text-[10px]">
+                  <span className={mutedText}>.vxl maps only</span>
+                  <span className={`tabular-nums ${mutedText}`}>
+                    {spawnedPlayers.length} / {MAX_SPAWNED_PLAYERS} players
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={
+                    stats?.format !== 'vxl' ||
+                    placingPlayer ||
+                    spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
+                  }
+                  onClick={onStartPlacePlayer}
+                  className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border text-xs font-semibold transition-colors ${
+                    placingPlayer
+                      ? 'bg-[#E05A2B] text-white border-[#E05A2B] cursor-wait'
+                      : stats?.format !== 'vxl' || spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
+                        ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
+                        : 'bg-[#E05A2B] text-white border-[#E05A2B] hover:bg-[#C94D22] cursor-pointer'
+                  }`}
+                  title={
+                    !stats
+                      ? 'Import a .vxl map first'
+                      : stats.format !== 'vxl'
+                        ? 'Player Models require an Ace of Spades .vxl map'
+                        : spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
+                          ? `Maximum of ${MAX_SPAWNED_PLAYERS} players`
+                          : placingPlayer
+                            ? 'Click anywhere on the .vxl map to spawn a player'
+                            : 'Click, then click anywhere on the .vxl map to spawn a player'
+                  }
+                >
+                  <span>{placingPlayer ? 'Click map to spawn…' : 'Place Player Model'}</span>
+                </button>
+
+                {!stats && (
+                  <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                    Import a <span className="font-mono-tabular">.vxl</span> map first — Player
+                    Models are available on <span className="font-mono-tabular">.vxl</span> maps.
+                  </p>
+                )}
+                {stats && stats.format !== 'vxl' && (
+                  <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                    Player Models are only available when a{' '}
+                    <span className="font-mono-tabular">.vxl</span> map file is loaded.
+                  </p>
+                )}
+                {stats?.format === 'vxl' &&
+                  spawnedPlayers.length === 0 &&
+                  !placingPlayer && (
+                    <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                      No player models yet. Place one on the map — click any spawned model to edit
+                      its stance, weapon, team color, or duplicate it right beside it.
+                    </p>
+                  )}
+                {spawnedPlayers.length >= MAX_SPAWNED_PLAYERS && (
+                  <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                    Maximum of {MAX_SPAWNED_PLAYERS} player models reached. Remove one to add
+                    another.
+                  </p>
+                )}
+
+                {spawnedPlayers.length > 0 && (
+                  <div className="space-y-1.5">
+                    {spawnedPlayers.map((player, index) => {
+                      const isSelected = selectedPlayerId === player.id;
+                      const weaponLabel =
+                        player.weapon === 'smg'
+                          ? 'SMG'
+                          : player.weapon.charAt(0).toUpperCase() + player.weapon.slice(1);
+                      const stanceLabel =
+                        player.stance.charAt(0).toUpperCase() + player.stance.slice(1);
+                      return (
+                        <div
+                          key={player.id}
+                          className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md border transition-colors ${
+                            isSelected
+                              ? 'border-[#E05A2B] bg-[#E05A2B]/10'
+                              : 'border-white/10 bg-white/5'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => onSelectPlayer(isSelected ? null : player.id)}
+                            className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                            title="Show pose and weapon controls next to this player"
+                          >
+                            <span
+                              className="w-3 h-3 rounded-sm border border-white/25 shrink-0"
+                              style={{ backgroundColor: player.teamColor }}
+                              aria-hidden="true"
+                            />
+                            <span className="min-w-0">
+                              <span className="block text-[11px] font-semibold text-[#D4DAE4] truncate">
+                                #{index + 1} · {weaponLabel} · {stanceLabel}
+                              </span>
+                              <span className={`block font-mono-tabular text-[10px] ${mutedText}`}>
+                                {player.x.toFixed(1)}, {player.y.toFixed(1)}, {player.z.toFixed(1)}
+                              </span>
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled={spawnedPlayers.length >= MAX_SPAWNED_PLAYERS}
+                            onClick={() => onDuplicatePlayer(player.id)}
+                            aria-label={`Duplicate player #${index + 1}`}
+                            title="Duplicate in current state"
+                            className="p-1 rounded text-[#8F98A6] hover:text-white hover:bg-white/10 disabled:opacity-40 transition-colors cursor-pointer shrink-0"
+                          >
+                            <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onRemovePlayer(player.id)}
+                            aria-label={`Remove player #${index + 1}`}
+                            title="Remove this player model"
+                            className="p-1 rounded text-[#8F98A6] hover:text-red-300 hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                          </button>
+                        </div>
+                      );
+                    })}
+
+                    <button
+                      type="button"
+                      onClick={onClearPlayers}
+                      className={`w-full px-2 py-1 rounded border text-[10px] font-medium transition-colors cursor-pointer ${inactiveBtn}`}
+                    >
+                      Clear all player models
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

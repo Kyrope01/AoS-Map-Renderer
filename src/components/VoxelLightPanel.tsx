@@ -1,15 +1,27 @@
 import { Lightbulb, Trash2, X } from 'lucide-react';
+import { RefObject } from 'react';
 import { VoxelLight } from '../voxel/types';
+import {
+  computeFloatingPanelCoords,
+  VOXEL_LIGHT_PANEL_GAP,
+  VOXEL_LIGHT_PANEL_H,
+  VOXEL_LIGHT_PANEL_W,
+  VoxelScreenPos,
+} from './floatingAnchor';
 
-export interface VoxelScreenPos {
-  x: number;
-  y: number;
-  visible: boolean;
-}
+export {
+  computeFloatingPanelCoords,
+  VOXEL_LIGHT_PANEL_GAP,
+  VOXEL_LIGHT_PANEL_H,
+  VOXEL_LIGHT_PANEL_W,
+};
+export type { VoxelScreenPos };
 
 interface VoxelLightPanelProps {
   light: VoxelLight;
-  screenPos: VoxelScreenPos;
+  initialScreenPos: VoxelScreenPos;
+  panelRef: RefObject<HTMLDivElement | null>;
+  dotRef: RefObject<HTMLDivElement | null>;
   onUpdate: (id: string, patch: Partial<VoxelLight>) => void;
   onRemove: (id: string) => void;
   onClose: () => void;
@@ -63,47 +75,57 @@ function PanelSlider({ id, label, value, min, max, step, displayValue, onChange 
 
 /**
  * Floating voxel-light editor anchored to the selected voxel's screen position.
- * Rendered in the viewport (not the sidebar) so intensity/range controls sit
- * right next to the light they affect.
+ * Positioned via GPU-composited `translate3d` synchronized with WebGL frames so
+ * camera orbits and Free Cam flight move it smoothly at full display refresh rate.
  */
-export function VoxelLightPanel({ light, screenPos, onUpdate, onRemove, onClose }: VoxelLightPanelProps) {
-  const PANEL_W = 232;
-  const PANEL_H = 248;
-  const margin = 12;
-
-  // Prefer placing the panel to the right of the voxel; flip left near the edge.
-  const placeRight = screenPos.x + 22 + PANEL_W <= window.innerWidth - margin;
-  const left = placeRight
-    ? screenPos.x + 22
-    : Math.max(margin, screenPos.x - PANEL_W - 22);
-  const top = Math.min(
-    Math.max(margin + 8, screenPos.y - PANEL_H / 2),
-    Math.max(margin, window.innerHeight - PANEL_H - margin),
+export function VoxelLightPanel({
+  light,
+  initialScreenPos,
+  panelRef,
+  dotRef,
+  onUpdate,
+  onRemove,
+  onClose,
+}: VoxelLightPanelProps) {
+  const { left, top } = computeFloatingPanelCoords(
+    initialScreenPos.x,
+    initialScreenPos.y,
+    VOXEL_LIGHT_PANEL_W,
+    VOXEL_LIGHT_PANEL_H,
+    VOXEL_LIGHT_PANEL_GAP,
+    window.innerWidth,
+    window.innerHeight,
   );
-
-  if (!screenPos.visible) return null;
 
   return (
     <>
       {/* Anchor dot on the voxel itself */}
-      {screenPos.visible && (
-        <div
-          className="pointer-events-none fixed z-30 -translate-x-1/2 -translate-y-1/2"
-          style={{ left: screenPos.x, top: screenPos.y }}
-          aria-hidden="true"
-        >
-          <span
-            className="block w-3 h-3 rounded-full border-2 border-white shadow-lg animate-pulse"
-            style={{ backgroundColor: light.color }}
-          />
-        </div>
-      )}
+      <div
+        ref={dotRef}
+        className="pointer-events-none fixed left-0 top-0 z-30 will-change-transform"
+        style={{
+          transform: `translate3d(${initialScreenPos.x}px, ${initialScreenPos.y}px, 0) translate(-50%, -50%)`,
+          visibility: initialScreenPos.visible ? 'visible' : 'hidden',
+        }}
+        aria-hidden="true"
+      >
+        <span
+          className="block w-3 h-3 rounded-full border-2 border-white shadow-lg"
+          style={{ backgroundColor: light.color }}
+        />
+      </div>
 
       <div
+        ref={panelRef}
         role="dialog"
         aria-label={`Voxel light controls at ${light.x}, ${light.y}, ${light.z}`}
-        className="fixed z-30 w-[232px] rounded-lg border border-white/12 bg-[#14171D]/96 text-[#F3F1EC] shadow-2xl p-3 space-y-3"
-        style={{ left, top, width: PANEL_W }}
+        onPointerDown={(e) => e.stopPropagation()}
+        className="fixed left-0 top-0 z-30 rounded-lg border border-white/12 bg-[#14171D]/96 text-[#F3F1EC] shadow-2xl p-3 space-y-3 will-change-transform"
+        style={{
+          width: VOXEL_LIGHT_PANEL_W,
+          transform: `translate3d(${left}px, ${top}px, 0)`,
+          visibility: initialScreenPos.visible ? 'visible' : 'hidden',
+        }}
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-2">

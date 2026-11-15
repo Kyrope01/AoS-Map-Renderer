@@ -1,16 +1,31 @@
-import { AlertCircle, Crosshair, Loader2, Upload, X } from 'lucide-react';
-import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertCircle, Crosshair, Loader2, Move, Upload, UserPlus, X } from 'lucide-react';
+import { ChangeEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
+import { PLAYER_PANEL_GAP, PLAYER_PANEL_W, PlayerModelPanel } from './components/PlayerModelPanel';
 import { TopBar } from './components/TopBar';
-import { VoxelLightPanel, VoxelScreenPos } from './components/VoxelLightPanel';
+import {
+  computeFloatingPanelCoords,
+  VOXEL_LIGHT_PANEL_GAP,
+  VOXEL_LIGHT_PANEL_H,
+  VOXEL_LIGHT_PANEL_W,
+  VoxelLightPanel,
+  VoxelScreenPos,
+} from './components/VoxelLightPanel';
 import { BACKDROP_THEMES } from './renderer/shaders';
 import { PrecomputedShadowData, VoxelViewport, VoxelViewportHandle } from './renderer/VoxelViewport';
 import { hydrateKv6Grid } from './voxel/kv6Parser';
 import { BuiltVoxelMesh, hydrateVoxelGeometry } from './voxel/mesher';
 import {
+  createSpawnedPlayer,
+  duplicateSpawnedPlayer,
+  snapPlayerYToGround,
+} from './voxel/playerModel';
+import {
+  MAX_SPAWNED_PLAYERS,
   MAX_VOXEL_LIGHTS,
   MeshStats,
   RenderSettings,
+  SpawnedPlayer,
   VoxelFormat,
   VoxelGrid,
   VoxelLight,
@@ -79,16 +94,26 @@ export default function App() {
   const [loadingFile, setLoadingFile] = useState<string | null>(null);
   const [loadedModel, setLoadedModel] = useState<LoadedModel | null>(null);
 
-  // Special Effects: voxel lights (point lights anchored to picked voxels)
+  // Miscellaneous: voxel lights (point lights anchored to picked voxels)
   const [voxelLights, setVoxelLights] = useState<VoxelLight[]>([]);
   const [pickingLight, setPickingLight] = useState(false);
   const [shadowWarning, setShadowWarning] = useState<string | null>(null);
   const [selectedLightId, setSelectedLightId] = useState<string | null>(null);
-  const [selectedScreenPos, setSelectedScreenPos] = useState<VoxelScreenPos>({
-    x: 0,
-    y: 0,
-    visible: false,
-  });
+
+  // Miscellaneous: player models (.vxl maps only)
+  const [spawnedPlayers, setSpawnedPlayers] = useState<SpawnedPlayer[]>([]);
+  const [placingPlayer, setPlacingPlayer] = useState(false);
+  const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null);
+  const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
+
+  // DOM refs for zero-lag GPU-composited panel anchoring synced to WebGL frames
+  const lightPanelRef = useRef<HTMLDivElement | null>(null);
+  const lightDotRef = useRef<HTMLDivElement | null>(null);
+  const playerPanelRef = useRef<HTMLDivElement | null>(null);
+  const selectedLightRef = useRef<VoxelLight | null>(null);
+  const selectedPlayerRef = useRef<SpawnedPlayer | null>(null);
+  const sidebarCollapsedRef = useRef(sidebarCollapsed);
+  sidebarCollapsedRef.current = sidebarCollapsed;
 
   useEffect(() => {
     return () => {
@@ -108,6 +133,13 @@ export default function App() {
     setVoxelLights([]);
     setSelectedLightId(null);
     setPickingLight(false);
+  }, []);
+
+  const clearSpawnedPlayers = useCallback(() => {
+    setSpawnedPlayers([]);
+    setSelectedPlayerId(null);
+    setPlacingPlayer(false);
+    setMovingPlayerId(null);
   }, []);
 
   const handleVoxelPicked = useCallback((x: number, y: number, z: number, normal: [number, number, number]) => {
@@ -153,6 +185,84 @@ export default function App() {
   const removeVoxelLight = useCallback((id: string) => {
     setVoxelLights((prev) => prev.filter((l) => l.id !== id));
     setSelectedLightId((prev) => (prev === id ? null : prev));
+  }, []);
+
+  const handlePlacePlayer = useCallback(
+    (x: number, y: number, z: number) => {
+      if (loadedModel?.stats.format !== 'vxl') {
+        setPlacingPlayer(false);
+        return;
+      }
+      if (spawnedPlayers.length >= MAX_SPAWNED_PLAYERS) {
+        setPlacingPlayer(false);
+        setErrorMsg(
+          `Maximum of ${MAX_SPAWNED_PLAYERS} player models reached. Remove one to add another.`,
+        );
+        return;
+      }
+      const next = createSpawnedPlayer(x, y, z);
+      setSpawnedPlayers((prev) => [...prev, next]);
+      setSelectedLightId(null);
+      setSelectedPlayerId(next.id);
+      setPlacingPlayer(false);
+    },
+    [loadedModel?.stats.format, spawnedPlayers.length],
+  );
+
+  const handleSelectPlayer = useCallback((id: string | null) => {
+    if (id !== null) {
+      setSelectedLightId(null);
+      setPickingLight(false);
+    }
+    setMovingPlayerId((prev) => (prev && prev !== id ? null : prev));
+    setSelectedPlayerId(id);
+  }, []);
+
+  const updateSpawnedPlayer = useCallback((id: string, patch: Partial<SpawnedPlayer>) => {
+    setSpawnedPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+  }, []);
+
+  const handleMovePlayer = useCallback((id: string, x: number, y: number, z: number) => {
+    setSpawnedPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, x, y, z } : p)));
+    setMovingPlayerId(null);
+  }, []);
+
+  const handleDuplicatePlayer = useCallback(
+    (id: string) => {
+      if (loadedModel?.stats.format !== 'vxl') return;
+      const source = spawnedPlayers.find((p) => p.id === id);
+      if (!source) return;
+      const dup = duplicateSpawnedPlayer(source, spawnedPlayers, loadedModel.grid);
+      if (!dup) {
+        setErrorMsg(
+          `Maximum of ${MAX_SPAWNED_PLAYERS} player models reached. Remove one to duplicate.`,
+        );
+        return;
+      }
+      setSpawnedPlayers((prev) => [...prev, dup]);
+      setSelectedLightId(null);
+      setSelectedPlayerId(dup.id);
+    },
+    [loadedModel, spawnedPlayers],
+  );
+
+  const handleSnapPlayerToGround = useCallback(
+    (id: string) => {
+      const grid = loadedModel?.grid ?? null;
+      if (!grid) return;
+      setSpawnedPlayers((prev) =>
+        prev.map((p) =>
+          p.id === id ? { ...p, y: snapPlayerYToGround(grid, p.x, p.y, p.z) } : p,
+        ),
+      );
+    },
+    [loadedModel?.grid],
+  );
+
+  const removeSpawnedPlayer = useCallback((id: string) => {
+    setSpawnedPlayers((prev) => prev.filter((p) => p.id !== id));
+    setSelectedPlayerId((prev) => (prev === id ? null : prev));
+    setMovingPlayerId((prev) => (prev === id ? null : prev));
   }, []);
 
   const handleFileLoad = useCallback(async (file: File) => {
@@ -246,6 +356,7 @@ export default function App() {
       });
       setSettings((prev) => ({ ...prev, waterColorOverride: '' }));
       clearVoxelLights();
+      clearSpawnedPlayers();
     } catch (err) {
       if (loadRequestIdRef.current !== requestId) return;
       setErrorMsg(
@@ -258,7 +369,7 @@ export default function App() {
         setLoadingFile(null);
       }
     }
-  }, [clearVoxelLights]);
+  }, [clearVoxelLights, clearSpawnedPlayers]);
 
   const onFileInputChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
@@ -288,68 +399,121 @@ export default function App() {
           cameraMode: prev.cameraMode === 'orbit' ? 'free' : 'orbit',
         }));
       } else if (e.key === 'Escape') {
-        setPickingLight((prev) => {
-          if (prev) return false;
-          return prev;
-        });
-        setSelectedLightId((prev) => {
-          if (prev) return null;
-          return prev;
-        });
+        setPickingLight((prev) => (prev ? false : prev));
+        setSelectedLightId((prev) => (prev ? null : prev));
+        setPlacingPlayer((prev) => (prev ? false : prev));
+        setMovingPlayerId((prev) => (prev ? null : prev));
+        setSelectedPlayerId((prev) => (prev ? null : prev));
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  // Track the selected voxel's screen position so the floating light panel
-  // follows it as the camera moves.
   const selectedLight = useMemo(
     () => voxelLights.find((l) => l.id === selectedLightId) ?? null,
     [voxelLights, selectedLightId],
   );
+  selectedLightRef.current = selectedLight;
 
-  const selectedX = selectedLight?.x;
-  const selectedY = selectedLight?.y;
-  const selectedZ = selectedLight?.z;
+  const selectedPlayer = useMemo(
+    () => spawnedPlayers.find((p) => p.id === selectedPlayerId) ?? null,
+    [spawnedPlayers, selectedPlayerId],
+  );
+  selectedPlayerRef.current = selectedPlayer;
 
-  useEffect(() => {
-    if (selectedX === undefined || selectedY === undefined || selectedZ === undefined) return;
-    setSelectedScreenPos({ x: 0, y: 0, visible: false });
-    let raf = 0;
-    // The floating panel only needs to follow a *moving* camera. Projecting
-    // (which reads the canvas rect and clones a vector) on every single frame
-    // forever is wasted work, so throttle the probe and skip the state update
-    // unless the projected position actually changed.
-    let lastProjection = 0;
-    const PROBE_INTERVAL_MS = 50;
+  const hiddenScreenPos: VoxelScreenPos = useMemo(
+    () => ({ x: 0, y: 0, visible: false }),
+    [],
+  );
 
-    const loop = (now: number) => {
-      if (now - lastProjection >= PROBE_INTERVAL_MS) {
-        lastProjection = now;
-        const pos = viewportRef.current?.projectVoxelToScreen(
-          selectedX,
-          selectedY,
-          selectedZ,
-        );
-        if (pos) {
-          setSelectedScreenPos((prev) => {
-            if (
-              Math.abs(prev.x - pos.x) < 0.5 &&
-              Math.abs(prev.y - pos.y) < 0.5 &&
-              prev.visible === pos.visible
-            ) {
-              return prev;
-            }
-            return pos;
-          });
+  // Directly update floating panel & dot transforms on the DOM inside every WebGL
+  // frame callback so orbiting, panning, and Free Cam flight track at full 60/120Hz
+  // without React re-render stepping or 50ms polling lag.
+  const syncFloatingAnchors = useCallback(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const rightMargin = !sidebarCollapsedRef.current && vw >= 640 ? 328 : 12;
+
+    const light = selectedLightRef.current;
+    const lightPanelEl = lightPanelRef.current;
+    const lightDotEl = lightDotRef.current;
+    if (light && (lightPanelEl || lightDotEl)) {
+      const pos = vp.projectVoxelToScreen(light.x, light.y, light.z);
+      if (lightDotEl) {
+        lightDotEl.style.visibility = pos.visible ? 'visible' : 'hidden';
+        if (pos.visible) {
+          lightDotEl.style.transform = `translate3d(${pos.x.toFixed(2)}px, ${pos.y.toFixed(2)}px, 0) translate(-50%, -50%)`;
         }
       }
-      raf = window.requestAnimationFrame(loop);
-    };
-    raf = window.requestAnimationFrame(loop);
-    return () => window.cancelAnimationFrame(raf);
-  }, [selectedLightId, selectedX, selectedY, selectedZ]);
+      if (lightPanelEl) {
+        lightPanelEl.style.visibility = pos.visible ? 'visible' : 'hidden';
+        if (pos.visible) {
+          const panelW = lightPanelEl.offsetWidth || VOXEL_LIGHT_PANEL_W;
+          const panelH = lightPanelEl.offsetHeight || VOXEL_LIGHT_PANEL_H;
+          const { left, top } = computeFloatingPanelCoords(
+            pos.x,
+            pos.y,
+            panelW,
+            panelH,
+            VOXEL_LIGHT_PANEL_GAP,
+            vw,
+            vh,
+            rightMargin,
+          );
+          lightPanelEl.style.transform = `translate3d(${left.toFixed(2)}px, ${top.toFixed(2)}px, 0)`;
+        }
+      }
+    }
+
+    const player = selectedPlayerRef.current;
+    const playerPanelEl = playerPanelRef.current;
+    if (player && playerPanelEl) {
+      const anchorY = player.y + (player.stance === 'crouched' ? 1.1 : 1.7);
+      const pos = vp.projectWorldToScreen(player.x, anchorY, player.z);
+      playerPanelEl.style.visibility = pos.visible ? 'visible' : 'hidden';
+      if (pos.visible) {
+        const panelW = playerPanelEl.offsetWidth || PLAYER_PANEL_W;
+        const panelH =
+          playerPanelEl.offsetHeight || (player.weapon === 'block' ? 470 : 424);
+        const { left, top } = computeFloatingPanelCoords(
+          pos.x,
+          pos.y,
+          panelW,
+          panelH,
+          PLAYER_PANEL_GAP,
+          vw,
+          vh,
+          rightMargin,
+        );
+        playerPanelEl.style.transform = `translate3d(${left.toFixed(2)}px, ${top.toFixed(2)}px, 0)`;
+      }
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    syncFloatingAnchors();
+  }, [
+    selectedLightId,
+    selectedLight?.x,
+    selectedLight?.y,
+    selectedLight?.z,
+    selectedPlayerId,
+    selectedPlayer?.x,
+    selectedPlayer?.y,
+    selectedPlayer?.z,
+    selectedPlayer?.stance,
+    selectedPlayer?.weapon,
+    sidebarCollapsed,
+    syncFloatingAnchors,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener('resize', syncFloatingAnchors);
+    return () => window.removeEventListener('resize', syncFloatingAnchors);
+  }, [syncFloatingAnchors]);
 
   return (
     <main
@@ -384,6 +548,14 @@ export default function App() {
         voxelLights={voxelLights}
         pickingMode={pickingLight}
         onVoxelPicked={handleVoxelPicked}
+        spawnedPlayers={spawnedPlayers}
+        selectedPlayerId={selectedPlayerId}
+        placingPlayer={placingPlayer}
+        movingPlayerId={movingPlayerId}
+        onPlacePlayer={handlePlacePlayer}
+        onMovePlayer={handleMovePlayer}
+        onSelectPlayer={handleSelectPlayer}
+        onFrameRendered={syncFloatingAnchors}
       />
 
       {/* Minimal Top HUD */}
@@ -451,10 +623,69 @@ export default function App() {
       {selectedLight && (
         <VoxelLightPanel
           light={selectedLight}
-          screenPos={selectedScreenPos}
+          initialScreenPos={hiddenScreenPos}
+          panelRef={lightPanelRef}
+          dotRef={lightDotRef}
           onUpdate={updateVoxelLight}
           onRemove={removeVoxelLight}
           onClose={() => setSelectedLightId(null)}
+        />
+      )}
+
+      {/* Player-model placement / relocation banner */}
+      {placingPlayer && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-[#E05A2B]/40 bg-[#14171D]/94 text-[#F3F1EC] shadow-xl">
+          <UserPlus className="w-4 h-4 text-[#E05A2B] shrink-0" aria-hidden="true" />
+          <span className="text-xs font-medium whitespace-nowrap">
+            Click on the map to spawn a player model
+          </span>
+          <button
+            type="button"
+            onClick={() => setPlacingPlayer(false)}
+            className="px-2 py-1 rounded border border-white/15 text-[11px] font-medium text-[#C6CDD9] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      {movingPlayerId && !placingPlayer && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-[#E05A2B]/40 bg-[#14171D]/94 text-[#F3F1EC] shadow-xl">
+          <Move className="w-4 h-4 text-[#E05A2B] shrink-0" aria-hidden="true" />
+          <span className="text-xs font-medium whitespace-nowrap">
+            Click anywhere on the map to move the selected player
+          </span>
+          <button
+            type="button"
+            onClick={() => setMovingPlayerId(null)}
+            className="px-2 py-1 rounded border border-white/15 text-[11px] font-medium text-[#C6CDD9] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      {/* Floating player-model controls, anchored next to the selected player */}
+      {selectedPlayer && (
+        <PlayerModelPanel
+          player={selectedPlayer}
+          initialScreenPos={hiddenScreenPos}
+          panelRef={playerPanelRef}
+          isMovingOnMap={movingPlayerId === selectedPlayer.id}
+          canDuplicate={spawnedPlayers.length < MAX_SPAWNED_PLAYERS}
+          onUpdate={updateSpawnedPlayer}
+          onDuplicate={handleDuplicatePlayer}
+          onToggleMoveOnMap={(id) => {
+            setPlacingPlayer(false);
+            setPickingLight(false);
+            setMovingPlayerId((prev) => (prev === id ? null : id));
+          }}
+          onSnapToGround={handleSnapPlayerToGround}
+          onRemove={removeSpawnedPlayer}
+          onClose={() => {
+            setSelectedPlayerId(null);
+            setMovingPlayerId(null);
+          }}
         />
       )}
 
@@ -532,15 +763,39 @@ export default function App() {
         onResetDefaults={() => {
           setSettings(DEFAULT_SETTINGS);
           clearVoxelLights();
+          clearSpawnedPlayers();
         }}
         voxelLights={voxelLights}
         shadowWarning={shadowWarning}
         pickingLight={pickingLight}
         selectedLightId={selectedLightId}
-        onStartPickLight={() => { setSelectedLightId(null); setPickingLight(true); }}
-        onSelectLight={setSelectedLightId}
+        onStartPickLight={() => {
+          setSelectedLightId(null);
+          setSelectedPlayerId(null);
+          setPlacingPlayer(false);
+          setMovingPlayerId(null);
+          setPickingLight(true);
+        }}
+        onSelectLight={(id) => {
+          if (id !== null) setSelectedPlayerId(null);
+          setSelectedLightId(id);
+        }}
         onRemoveLight={removeVoxelLight}
         onClearLights={clearVoxelLights}
+        spawnedPlayers={spawnedPlayers}
+        placingPlayer={placingPlayer}
+        selectedPlayerId={selectedPlayerId}
+        onStartPlacePlayer={() => {
+          setPickingLight(false);
+          setSelectedLightId(null);
+          setSelectedPlayerId(null);
+          setMovingPlayerId(null);
+          setPlacingPlayer(true);
+        }}
+        onSelectPlayer={handleSelectPlayer}
+        onDuplicatePlayer={handleDuplicatePlayer}
+        onRemovePlayer={removeSpawnedPlayer}
+        onClearPlayers={clearSpawnedPlayers}
       />
     </main>
   );
