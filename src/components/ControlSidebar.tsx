@@ -6,7 +6,8 @@ import {
   Waves,
   X,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import * as THREE from 'three';
 import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/shaders';
 import {
   BackdropPreset,
@@ -88,6 +89,215 @@ function SliderControl({
         style={{ background: trackBg }}
         className="studio-slider w-full"
       />
+    </div>
+  );
+}
+
+const ZENITH_PALETTE = [
+  { name: 'Alpine Blue', hex: '#2F6FB3' },
+  { name: 'Deep Azure', hex: '#0284C7' },
+  { name: 'Nordic Indigo', hex: '#6E8EB0' },
+  { name: 'Twilight Navy', hex: '#0F172A' },
+  { name: 'Sunset Violet', hex: '#3B5680' },
+  { name: 'Crimson Sky', hex: '#212645' },
+  { name: 'Warm Cream', hex: '#F3EFE8' },
+  { name: 'Pitch Black', hex: '#000000' },
+];
+
+const HORIZON_PALETTE = [
+  { name: 'Alpine Mist', hex: '#CBE3F5' },
+  { name: 'Nordic Frost', hex: '#CEDAE4' },
+  { name: 'Golden Amber', hex: '#F2BC8D' },
+  { name: 'Sunset Crimson', hex: '#C9837D' },
+  { name: 'Moonlit Steel', hex: '#1C293D' },
+  { name: 'Rose Quartz', hex: '#E2B4BD' },
+  { name: 'Warm Paper', hex: '#E7E1D6' },
+  { name: 'Pitch Black', hex: '#000000' },
+];
+
+function hexToHsl(hex: string) {
+  try {
+    const c = new THREE.Color(hex);
+    const hsl = { h: 0, s: 0, l: 0 };
+    c.getHSL(hsl);
+    return hsl;
+  } catch {
+    return { h: 0.58, s: 0.6, l: 0.45 };
+  }
+}
+
+function hslToHex(h: number, s: number, l: number): string {
+  const c = new THREE.Color();
+  c.setHSL(
+    THREE.MathUtils.clamp(h, 0, 1),
+    THREE.MathUtils.clamp(s, 0, 1),
+    THREE.MathUtils.clamp(l, 0, 1),
+  );
+  return '#' + c.getHexString().toUpperCase();
+}
+
+interface InlineColorPickerProps {
+  id: string;
+  label: string;
+  subLabel?: string;
+  value: string;
+  presetPalette: { name: string; hex: string }[];
+  onChange: (hex: string) => void;
+}
+
+function InlineColorPicker({
+  id,
+  label,
+  subLabel,
+  value,
+  presetPalette,
+  onChange,
+}: InlineColorPickerProps) {
+  const [hexInput, setHexInput] = useState(value);
+  const [isEditingHex, setIsEditingHex] = useState(false);
+
+  useEffect(() => {
+    if (!isEditingHex) {
+      setHexInput(value.toUpperCase());
+    }
+  }, [value, isEditingHex]);
+
+  const hsl = hexToHsl(value);
+  const hueDeg = Math.round(hsl.h * 360);
+  const lightnessPct = Math.round(hsl.l * 100);
+
+  const onHueChange = (newDeg: number) => {
+    const newH = newDeg / 360;
+    const s = hsl.s < 0.12 ? 0.75 : hsl.s;
+    const l = hsl.l < 0.08 || hsl.l > 0.95 ? 0.5 : hsl.l;
+    const nextHex = hslToHex(newH, s, l);
+    onChange(nextHex);
+  };
+
+  const onLightnessChange = (newPct: number) => {
+    const newL = newPct / 100;
+    const nextHex = hslToHex(hsl.h, hsl.s, newL);
+    onChange(nextHex);
+  };
+
+  const commitHex = (text: string) => {
+    const trimmed = text.trim();
+    const clean = trimmed.startsWith('#') ? trimmed : `#${trimmed}`;
+    if (/^#[0-9A-Fa-f]{6}$/.test(clean)) {
+      onChange(clean.toUpperCase());
+      setHexInput(clean.toUpperCase());
+    } else {
+      setHexInput(value.toUpperCase());
+    }
+    setIsEditingHex(false);
+  };
+
+  const lightnessTrack = `linear-gradient(to right, #000000 0%, ${hslToHex(
+    hsl.h,
+    Math.max(0.65, hsl.s),
+    0.5,
+  )} 50%, #FFFFFF 100%)`;
+  const hueTrack =
+    'linear-gradient(to right, #ff0000 0%, #ffff00 17%, #00ff00 33%, #00ffff 50%, #0000ff 67%, #ff00ff 83%, #ff0000 100%)';
+
+  return (
+    <div className="p-2.5 rounded-md border border-white/8 bg-[#101318]/80 space-y-2">
+      {/* Header: Label + Swatch & Hex input */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <label htmlFor={id} className="text-[11px] font-semibold text-[#D4DAE4] block truncate">
+            {label}
+          </label>
+          {subLabel && (
+            <span className="text-[9px] text-[#7E8899] block leading-tight">{subLabel}</span>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 shrink-0">
+          <span
+            className="w-5 h-5 rounded border border-white/25 shrink-0 shadow-inner"
+            style={{ backgroundColor: value }}
+            aria-hidden="true"
+          />
+          <input
+            id={id}
+            type="text"
+            value={isEditingHex ? hexInput : value.toUpperCase()}
+            onFocus={() => setIsEditingHex(true)}
+            onChange={(e) => setHexInput(e.target.value)}
+            onBlur={(e) => commitHex(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') commitHex((e.target as HTMLInputElement).value);
+              else if (e.key === 'Escape') {
+                setHexInput(value.toUpperCase());
+                setIsEditingHex(false);
+              }
+            }}
+            maxLength={7}
+            className="w-16 px-1.5 py-0.5 rounded border border-white/10 bg-[#161A22] text-[10px] font-mono-tabular font-medium text-[#F3F1EC] text-center uppercase focus:outline-none focus:border-[#E05A2B] transition-colors"
+          />
+        </div>
+      </div>
+
+      {/* Preset Swatches row */}
+      <div className="flex items-center gap-1 overflow-x-auto py-0.5 scrollbar-none">
+        {presetPalette.map((p) => {
+          const isSelected = value.toLowerCase() === p.hex.toLowerCase();
+          return (
+            <button
+              key={p.hex + p.name}
+              type="button"
+              title={`${p.name} (${p.hex})`}
+              aria-label={`${p.name} color`}
+              onClick={() => {
+                onChange(p.hex);
+                setHexInput(p.hex.toUpperCase());
+              }}
+              className={`w-4 h-4 rounded-sm border shrink-0 transition-transform cursor-pointer ${
+                isSelected
+                  ? 'ring-2 ring-[#E05A2B] border-white scale-110 z-10'
+                  : 'border-white/20 hover:scale-110 hover:border-white/50'
+              }`}
+              style={{ backgroundColor: p.hex }}
+            />
+          );
+        })}
+      </div>
+
+      {/* Inline Sliders: Hue and Lightness */}
+      <div className="space-y-1.5 pt-1 border-t border-white/6">
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center justify-between text-[9px] text-[#8F98A6]">
+            <span>Hue</span>
+            <span className="font-mono-tabular">{hueDeg}°</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={360}
+            step={1}
+            value={hueDeg}
+            onChange={(e) => onHueChange(parseFloat(e.target.value))}
+            style={{ background: hueTrack }}
+            className="studio-slider w-full h-1.5 rounded appearance-none cursor-pointer"
+          />
+        </div>
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center justify-between text-[9px] text-[#8F98A6]">
+            <span>Lightness</span>
+            <span className="font-mono-tabular">{lightnessPct}%</span>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={lightnessPct}
+            onChange={(e) => onLightnessChange(parseFloat(e.target.value))}
+            style={{ background: lightnessTrack }}
+            className="studio-slider w-full h-1.5 rounded appearance-none cursor-pointer"
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -323,10 +533,13 @@ export function ControlSidebar({
             {/* Sky & Atmosphere Presets */}
             <div className="space-y-2">
               <span className={sectionLabel}>Sky & Atmosphere</span>
+
               <div className="grid grid-cols-2 gap-1.5">
                 {(Object.keys(BACKDROP_THEMES) as BackdropPreset[]).map((key) => {
                   const theme = BACKDROP_THEMES[key];
                   const active = settings.backdrop === key;
+                  const isCustom = key === 'custom';
+
                   return (
                     <button
                       key={key}
@@ -335,25 +548,87 @@ export function ControlSidebar({
                         onUpdateSettings({
                           backdrop: key,
                           sunColor: theme.defaultSunHex,
-                          fogColor: theme.fogHex,
+                          fogColor: isCustom ? settings.customHorizonColor : theme.fogHex,
                         })
                       }
-                      className={`flex items-center gap-2 px-2 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
+                      className={`flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
                         active ? activeBtn : inactiveBtn
                       }`}
                     >
-                      <span
-                        className="w-3 h-3 rounded-sm border border-white/25 shrink-0"
-                        style={{
-                          background: `linear-gradient(180deg, ${theme.zenithHex} 0%, ${theme.horizonHex} 100%)`,
-                        }}
-                        aria-hidden="true"
-                      />
-                      <span className="truncate">{theme.label}</span>
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span
+                          className="w-3 h-3 rounded-sm border border-white/25 shrink-0 overflow-hidden"
+                          style={{
+                            background: `linear-gradient(180deg, ${
+                              isCustom ? settings.customZenithColor : theme.zenithHex
+                            } 0%, ${
+                              isCustom ? settings.customHorizonColor : theme.horizonHex
+                            } 100%)`,
+                          }}
+                          aria-hidden="true"
+                        />
+                        <span className="truncate">
+                          {isCustom
+                            ? settings.customSkyName.trim() || 'Custom Sky'
+                            : theme.label}
+                        </span>
+                      </div>
                     </button>
                   );
                 })}
               </div>
+
+              {/* Custom Sky Configuration Panel (active when Custom Sky is selected) */}
+              {settings.backdrop === 'custom' && (
+                <div className="p-3 rounded-md border border-white/10 bg-white/5 space-y-3 mt-2">
+                  {/* Sky Name Input */}
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <label
+                        htmlFor="custom-sky-name-input"
+                        className="font-medium text-[#B8C0CC]"
+                      >
+                        Sky Name
+                      </label>
+                      <span className="text-[10px] text-[#8992A2]">Custom Preset</span>
+                    </div>
+                    <input
+                      id="custom-sky-name-input"
+                      type="text"
+                      value={settings.customSkyName}
+                      onChange={(e) => onUpdateSettings({ customSkyName: e.target.value })}
+                      placeholder="Custom Sky"
+                      maxLength={24}
+                      className="w-full px-2.5 py-1.5 rounded border border-white/10 bg-[#101318] text-xs font-medium text-[#F3F1EC] placeholder-[#6B7280] focus:outline-none focus:border-[#E05A2B] transition-colors"
+                    />
+                  </div>
+
+                  {/* Zenith Color Selector (ABOVE Horizon) */}
+                  <InlineColorPicker
+                    id="custom-zenith-picker"
+                    label="Zenith Color"
+                    subLabel="Top of sky dome"
+                    value={settings.customZenithColor}
+                    onChange={(hex) => onUpdateSettings({ customZenithColor: hex })}
+                    presetPalette={ZENITH_PALETTE}
+                  />
+
+                  {/* Horizon Color Selector (BELOW Zenith) */}
+                  <InlineColorPicker
+                    id="custom-horizon-picker"
+                    label="Horizon Color"
+                    subLabel="Horizon skyline & fog sync"
+                    value={settings.customHorizonColor}
+                    onChange={(hex) => {
+                      onUpdateSettings({
+                        customHorizonColor: hex,
+                        fogColor: settings.fogSyncSky ? hex : settings.fogColor,
+                      });
+                    }}
+                    presetPalette={HORIZON_PALETTE}
+                  />
+                </div>
+              )}
             </div>
 
             {/* Sunlight Color & Direction */}
@@ -501,7 +776,9 @@ export function ControlSidebar({
                     type="color"
                     value={
                       settings.fogSyncSky
-                        ? BACKDROP_THEMES[settings.backdrop].fogHex
+                        ? (settings.backdrop === 'custom'
+                            ? settings.customHorizonColor
+                            : BACKDROP_THEMES[settings.backdrop].fogHex)
                         : settings.fogColor
                     }
                     onChange={(e) =>

@@ -783,15 +783,18 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const s = settingsRef.current;
         const theme = BACKDROP_THEMES[s.backdrop];
         const meshData = builtMeshRef.current;
+        const isCustom = s.backdrop === 'custom';
 
-        const targetFogHex = s.fogSyncSky ? theme.fogHex : s.fogColor || theme.fogHex;
+        const targetFogHex = s.fogSyncSky
+          ? (isCustom ? s.customHorizonColor : theme.fogHex)
+          : s.fogColor || theme.fogHex;
         _fogColor.set(targetFogHex);
         (scene.background as THREE.Color).copy(_fogColor);
 
         const fogScale = Math.min(1, 32 / Math.max(32, modelRadius));
         const scaledFog = theme.fogDensity * s.fogDensity * fogScale;
 
-        hemiLight.color.set(theme.skyHex);
+        hemiLight.color.set(isCustom ? s.customHorizonColor : theme.skyHex);
         hemiLight.groundColor.set(theme.groundHex);
 
         const az = THREE.MathUtils.degToRad(s.lightAzimuth);

@@ -121,6 +121,20 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     isLight: true,
     isSkyDome: false,
   },
+  custom: {
+    id: 'custom',
+    label: 'Custom Sky',
+    bgHex: '#CBE3F5',
+    zenithHex: '#2F6FB3',
+    horizonHex: '#CBE3F5',
+    fogHex: '#CBE3F5',
+    fogDensity: 0.0024,
+    skyHex: '#E5F2FF',
+    groundHex: '#556554',
+    defaultSunHex: '#FFF7E2',
+    isLight: true,
+    isSkyDome: true,
+  },
 };
 
 export interface ShaderPresetMeta {
@@ -226,10 +240,16 @@ export function syncSharedUniforms(
   uniforms.uLightIntensity.value = settings.lightIntensity;
 
   const theme = BACKDROP_THEMES[settings.backdrop];
-  uniforms.uSkyColor.value.set(theme.skyHex);
+  if (settings.backdrop === 'custom') {
+    uniforms.uZenithColor.value.set(settings.customZenithColor || theme.zenithHex);
+    uniforms.uHorizonColor.value.set(settings.customHorizonColor || theme.horizonHex);
+    uniforms.uSkyColor.value.set(settings.customHorizonColor || theme.skyHex);
+  } else {
+    uniforms.uSkyColor.value.set(theme.skyHex);
+    uniforms.uZenithColor.value.set(theme.zenithHex);
+    uniforms.uHorizonColor.value.set(theme.horizonHex);
+  }
   uniforms.uGroundColor.value.set(theme.groundHex);
-  uniforms.uZenithColor.value.set(theme.zenithHex);
-  uniforms.uHorizonColor.value.set(theme.horizonHex);
   uniforms.uFogMode.value = FOG_MODE_INDEX[settings.fogMode];
   uniforms.uFogColor.value.copy(resolvedFogColor);
   uniforms.uFogDensity.value = scaledFogDensity;

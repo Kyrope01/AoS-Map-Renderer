@@ -45,7 +45,8 @@ export type BackdropPreset =
   | 'dusk'
   | 'midnight'
   | 'graphite'
-  | 'paper';
+  | 'paper'
+  | 'custom';
 
 export type CameraPreset = 'iso' | 'front' | 'side' | 'top' | 'low';
 
@@ -58,6 +59,10 @@ export type SliceAxis = 'none' | 'x' | 'y' | 'z';
 export interface RenderSettings {
   shaderMode: ShaderMode;
   backdrop: BackdropPreset;
+  // Custom sky parameters
+  customSkyName: string;         // user-defined sky name
+  customZenithColor: string;     // hex e.g. '#2F6FB3'
+  customHorizonColor: string;    // hex e.g. '#CBE3F5'
   // Material & shader parameters
   aoStrength: number;       // 0..1.5
   roughness: number;        // 0.05..1.0

@@ -18,6 +18,9 @@ import { parseVxl } from './voxel/vxlParser';
 const DEFAULT_SETTINGS: RenderSettings = {
   shaderMode: 'atmospheric',
   backdrop: 'alpine',
+  customSkyName: 'Custom Sky',
+  customZenithColor: '#2F6FB3',
+  customHorizonColor: '#CBE3F5',
   aoStrength: 0.9,
   roughness: 0.55,
   metalness: 0.06,
@@ -106,6 +109,7 @@ export default function App() {
   const handleFileLoad = useCallback(async (file: File) => {
     setErrorMsg(null);
     const lower = file.name.toLowerCase();
+
     let format: VoxelFormat | null = null;
     if (lower.endsWith('.kv6')) format = 'kv6';
     else if (lower.endsWith('.vxl')) format = 'vxl';
