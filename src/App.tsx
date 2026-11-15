@@ -1,16 +1,19 @@
-import { AlertCircle, Upload, X } from 'lucide-react';
+import { AlertCircle, Crosshair, Upload, X } from 'lucide-react';
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
 import { TopBar } from './components/TopBar';
+import { VoxelLightPanel, VoxelScreenPos } from './components/VoxelLightPanel';
 import { BACKDROP_THEMES } from './renderer/shaders';
 import { VoxelViewport, VoxelViewportHandle } from './renderer/VoxelViewport';
 import { parseKv6 } from './voxel/kv6Parser';
 import { buildVoxelGeometry, BuiltVoxelMesh } from './voxel/mesher';
 import {
+  MAX_VOXEL_LIGHTS,
   MeshStats,
   RenderSettings,
   VoxelFormat,
   VoxelGrid,
+  VoxelLight,
   VoxelParseError,
 } from './voxel/types';
 import { parseVxl } from './voxel/vxlParser';
@@ -18,7 +21,6 @@ import { parseVxl } from './voxel/vxlParser';
 const DEFAULT_SETTINGS: RenderSettings = {
   shaderMode: 'atmospheric',
   backdrop: 'alpine',
-  customSkyName: 'Custom Sky',
   customZenithColor: '#2F6FB3',
   customHorizonColor: '#CBE3F5',
   aoStrength: 0.9,
@@ -71,6 +73,17 @@ export default function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [loadedModel, setLoadedModel] = useState<LoadedModel | null>(null);
 
+  // Special Effects: voxel lights (point lights anchored to picked voxels)
+  const [voxelLights, setVoxelLights] = useState<VoxelLight[]>([]);
+  const [pickingLight, setPickingLight] = useState(false);
+  const [shadowWarning, setShadowWarning] = useState<string | null>(null);
+  const [selectedLightId, setSelectedLightId] = useState<string | null>(null);
+  const [selectedScreenPos, setSelectedScreenPos] = useState<VoxelScreenPos>({
+    x: 0,
+    y: 0,
+    visible: false,
+  });
+
   const { builtMesh, stats } = useMemo<{
     builtMesh: BuiltVoxelMesh | null;
     stats: MeshStats | null;
@@ -106,6 +119,50 @@ export default function App() {
     setSettings((prev) => ({ ...prev, ...patch }));
   }, []);
 
+  const clearVoxelLights = useCallback(() => {
+    setVoxelLights([]);
+    setSelectedLightId(null);
+    setPickingLight(false);
+  }, []);
+
+  const handleVoxelPicked = useCallback((x: number, y: number, z: number, normal: [number, number, number]) => {
+    const existing = voxelLights.find((light) => light.x === x && light.y === y && light.z === z);
+    if (existing) {
+      setSelectedLightId(existing.id);
+      setPickingLight(false);
+      return;
+    }
+    if (voxelLights.length >= MAX_VOXEL_LIGHTS) return;
+    const id =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `light-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    const newLight: VoxelLight = {
+      id,
+      x,
+      y,
+      z,
+      normal,
+      intensity: 3.5,
+      range: 28,
+      color: '#FFB35C',
+    };
+    setVoxelLights((prev) => [...prev, newLight]);
+    setSelectedLightId(id);
+    setPickingLight(false);
+  }, [voxelLights]);
+
+  const updateVoxelLight = useCallback((id: string, patch: Partial<VoxelLight>) => {
+    setVoxelLights((prev) =>
+      prev.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+    );
+  }, []);
+
+  const removeVoxelLight = useCallback((id: string) => {
+    setVoxelLights((prev) => prev.filter((l) => l.id !== id));
+    setSelectedLightId((prev) => (prev === id ? null : prev));
+  }, []);
+
   const handleFileLoad = useCallback(async (file: File) => {
     setErrorMsg(null);
     const lower = file.name.toLowerCase();
@@ -133,6 +190,7 @@ export default function App() {
         parseMs,
       });
       setSettings((prev) => ({ ...prev, waterColorOverride: '' }));
+      clearVoxelLights();
     } catch (err) {
       if (err instanceof VoxelParseError) {
         setErrorMsg(err.message);
@@ -142,7 +200,7 @@ export default function App() {
         );
       }
     }
-  }, []);
+  }, [clearVoxelLights]);
 
   const onFileInputChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
@@ -153,7 +211,8 @@ export default function App() {
     [handleFileLoad],
   );
 
-  // Keyboard shortcuts: 'H' toggles sidebar / Zen View, 'F' toggles Free Cam
+  // Keyboard shortcuts: 'H' toggles sidebar / Zen View, 'F' toggles Free Cam,
+  // 'Esc' cancels voxel picking / closes the floating light panel.
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (
@@ -170,11 +229,59 @@ export default function App() {
           ...prev,
           cameraMode: prev.cameraMode === 'orbit' ? 'free' : 'orbit',
         }));
+      } else if (e.key === 'Escape') {
+        setPickingLight((prev) => {
+          if (prev) return false;
+          return prev;
+        });
+        setSelectedLightId((prev) => {
+          if (prev) return null;
+          return prev;
+        });
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  // Track the selected voxel's screen position so the floating light panel
+  // follows it as the camera moves.
+  const selectedLight = useMemo(
+    () => voxelLights.find((l) => l.id === selectedLightId) ?? null,
+    [voxelLights, selectedLightId],
+  );
+
+  const selectedX = selectedLight?.x;
+  const selectedY = selectedLight?.y;
+  const selectedZ = selectedLight?.z;
+
+  useEffect(() => {
+    if (selectedX === undefined || selectedY === undefined || selectedZ === undefined) return;
+    setSelectedScreenPos({ x: 0, y: 0, visible: false });
+    let raf = 0;
+    const loop = () => {
+      const pos = viewportRef.current?.projectVoxelToScreen(
+        selectedX,
+        selectedY,
+        selectedZ,
+      );
+      if (pos) {
+        setSelectedScreenPos((prev) => {
+          if (
+            Math.abs(prev.x - pos.x) < 0.5 &&
+            Math.abs(prev.y - pos.y) < 0.5 &&
+            prev.visible === pos.visible
+          ) {
+            return prev;
+          }
+          return pos;
+        });
+      }
+      raf = window.requestAnimationFrame(loop);
+    };
+    raf = window.requestAnimationFrame(loop);
+    return () => window.cancelAnimationFrame(raf);
+  }, [selectedLightId, selectedX, selectedY, selectedZ]);
 
   return (
     <main
@@ -199,9 +306,14 @@ export default function App() {
       <VoxelViewport
         ref={viewportRef}
         builtMesh={builtMesh}
+        voxelGrid={loadedModel?.grid ?? null}
+        onShadowWarning={setShadowWarning}
         settings={settings}
         onFileDrop={(f) => void handleFileLoad(f)}
         onAdjustFlySpeed={(flySpeed) => updateSettings({ flySpeed })}
+        voxelLights={voxelLights}
+        pickingMode={pickingLight}
+        onVoxelPicked={handleVoxelPicked}
       />
 
       {/* Minimal Top HUD */}
@@ -246,6 +358,34 @@ export default function App() {
         <div className="pointer-events-none fixed bottom-3 left-3 z-10 px-2.5 py-1.5 rounded-md border text-[11px] font-medium shadow-sm bg-[#14171D]/90 text-[#C6CDD9] border-white/10">
           Drag look · WASD fly · E/Q up/down · Shift boost · Scroll speed · F exit
         </div>
+      )}
+
+      {/* Voxel-light picking banner */}
+      {pickingLight && (
+        <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-[#E05A2B]/40 bg-[#14171D]/94 text-[#F3F1EC] shadow-xl">
+          <Crosshair className="w-4 h-4 text-[#E05A2B] shrink-0" aria-hidden="true" />
+          <span className="text-xs font-medium whitespace-nowrap">
+            Click a voxel to make it a light source
+          </span>
+          <button
+            type="button"
+            onClick={() => setPickingLight(false)}
+            className="px-2 py-1 rounded border border-white/15 text-[11px] font-medium text-[#C6CDD9] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+          >
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      {/* Floating voxel-light controls, anchored next to the selected voxel */}
+      {selectedLight && (
+        <VoxelLightPanel
+          light={selectedLight}
+          screenPos={selectedScreenPos}
+          onUpdate={updateVoxelLight}
+          onRemove={removeVoxelLight}
+          onClose={() => setSelectedLightId(null)}
+        />
       )}
 
       {/* Clean Minimal Empty Stage Prompt (when no file is imported yet) */}
@@ -301,7 +441,18 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
         onUpdateSettings={updateSettings}
-        onResetDefaults={() => setSettings(DEFAULT_SETTINGS)}
+        onResetDefaults={() => {
+          setSettings(DEFAULT_SETTINGS);
+          clearVoxelLights();
+        }}
+        voxelLights={voxelLights}
+        shadowWarning={shadowWarning}
+        pickingLight={pickingLight}
+        selectedLightId={selectedLightId}
+        onStartPickLight={() => { setSelectedLightId(null); setPickingLight(true); }}
+        onSelectLight={setSelectedLightId}
+        onRemoveLight={removeVoxelLight}
+        onClearLights={clearVoxelLights}
       />
     </main>
   );

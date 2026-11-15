@@ -1,4 +1,4 @@
-import { VoxelGrid, VoxelParseError } from './types';
+import { RegionBounds, VoxelGrid, VoxelParseError } from './types';
 
 const KV6_MAGIC = 0x6c78764b; // "Kvxl" little-endian
 
@@ -91,6 +91,24 @@ class Kv6Grid implements VoxelGrid {
     }
     return this.lookupSparse(idx);
   }
+
+  forEachSolid(cb: (x: number, y: number, z: number, color: number) => void, bounds?: RegionBounds): void {
+    const visit = (index: number, color: number) => {
+      const x = index % this.width;
+      const row = Math.floor(index / this.width);
+      const z = row % this.depth;
+      const y = Math.floor(row / this.depth);
+      if (!bounds || (x >= bounds.minX && x < bounds.maxX && y >= bounds.minY && y < bounds.maxY && z >= bounds.minZ && z < bounds.maxZ)) cb(x, y, z, color);
+    };
+    if (this.dense) {
+      for (let i = 0; i < this.dense.length; i++) if (this.dense[i]) visit(i, this.dense[i]);
+    } else {
+      for (let i = 0; i < this.sparseKeys!.length; i++) {
+        if (this.sparseKeys![i] !== -1) visit(this.sparseKeys![i], this.sparseVals![i]);
+      }
+    }
+  }
+
 }
 
 /**

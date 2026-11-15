@@ -60,9 +60,8 @@ export interface RenderSettings {
   shaderMode: ShaderMode;
   backdrop: BackdropPreset;
   // Custom sky parameters
-  customSkyName: string;         // user-defined sky name
-  customZenithColor: string;     // hex e.g. '#2F6FB3'
-  customHorizonColor: string;    // hex e.g. '#CBE3F5'
+  customZenithColor: string;    // hex e.g. '#2F6FB3'
+  customHorizonColor: string;   // hex e.g. '#CBE3F5'
   // Material & shader parameters
   aoStrength: number;       // 0..1.5
   roughness: number;        // 0.05..1.0
@@ -101,6 +100,23 @@ export interface RenderSettings {
   vignette: number;         // 0..1.0
   chromatic: number;        // 0..1.0
   pixelate: number;         // 0 (off) or 2..8
+}
+
+/**
+ * A point light anchored to a single voxel in the loaded grid.
+ * Coordinates are voxel-grid indices (x: 0..width-1, y: 0..height-1, z: 0..depth-1).
+ */
+export const MAX_VOXEL_LIGHTS = 512;
+
+export interface VoxelLight {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  normal: [number, number, number]; // picked surface normal
+  intensity: number; // 0..100 (0 = off)
+  range: number;     // 4..120 voxels (light falloff distance)
+  color: string;     // hex e.g. '#FFB35C'
 }
 
 export interface MeshStats {

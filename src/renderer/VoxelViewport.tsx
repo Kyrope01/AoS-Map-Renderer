@@ -13,7 +13,9 @@ import {
   computeExportTiles,
   computeUpscaledDimensions,
 } from '../voxel/exportResolution';
-import { CameraPreset, RenderSettings } from '../voxel/types';
+import { CameraPreset, MAX_VOXEL_LIGHTS, RenderSettings, VoxelGrid, VoxelLight } from '../voxel/types';
+import { updateVoxelLightTexture } from './voxelLightTexture';
+import { createVoxelShadowTexture } from './voxelShadows';
 import {
   BACKDROP_THEMES,
   createMaterialBank,
@@ -29,13 +31,24 @@ export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
   getDisplayResolution: () => { width: number; height: number };
   exportPng: (filename: string, targetWidth?: number) => Promise<void>;
+  /** Projects a voxel-grid coordinate to viewport-relative CSS pixels. */
+  projectVoxelToScreen: (
+    x: number,
+    y: number,
+    z: number,
+  ) => { x: number; y: number; visible: boolean };
 }
 
 interface VoxelViewportProps {
   builtMesh: BuiltVoxelMesh | null;
+  voxelGrid: VoxelGrid | null;
+  onShadowWarning: (message: string | null) => void;
   settings: RenderSettings;
   onFileDrop: (file: File) => void;
   onAdjustFlySpeed?: (nextSpeed: number) => void;
+  voxelLights: VoxelLight[];
+  pickingMode: boolean;
+  onVoxelPicked: (x: number, y: number, z: number, normal: [number, number, number]) => void;
 }
 
 const StudioPostShader = {
@@ -150,14 +163,27 @@ const _offsetVec = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
-  function VoxelViewport({ builtMesh, settings, onFileDrop, onAdjustFlySpeed }, ref) {
+  function VoxelViewport(
+    { builtMesh, voxelGrid, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, voxelLights, pickingMode, onVoxelPicked },
+    ref,
+  ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
     const settingsRef = useRef(settings);
     settingsRef.current = settings;
+    const voxelGridRef = useRef(voxelGrid);
+    voxelGridRef.current = voxelGrid;
+    const shadowWarningRef = useRef(onShadowWarning);
+    shadowWarningRef.current = onShadowWarning;
     const builtMeshRef = useRef(builtMesh);
     builtMeshRef.current = builtMesh;
     const flySpeedCbRef = useRef(onAdjustFlySpeed);
     flySpeedCbRef.current = onAdjustFlySpeed;
+    const voxelLightsRef = useRef(voxelLights);
+    voxelLightsRef.current = voxelLights;
+    const pickingModeRef = useRef(pickingMode);
+    pickingModeRef.current = pickingMode;
+    const onVoxelPickedRef = useRef(onVoxelPicked);
+    onVoxelPickedRef.current = onVoxelPicked;
 
     const [contextLost, setContextLost] = useState(false);
     const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -166,8 +192,15 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       applyPreset: (preset: CameraPreset, instant?: boolean) => void;
       syncMesh: (meshData: BuiltVoxelMesh | null, instantCamera?: boolean) => void;
       syncSettings: () => void;
+      syncVoxelLights: () => void;
+      syncVoxelGrid: (grid: VoxelGrid | null) => void;
       getDisplayResolution: () => { width: number; height: number };
       exportPng: (filename: string, targetWidth?: number) => Promise<void>;
+      projectVoxelToScreen: (
+        x: number,
+        y: number,
+        z: number,
+      ) => { x: number; y: number; visible: boolean };
     } | null>(null);
 
     useImperativeHandle(ref, () => ({
@@ -185,6 +218,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         if (engineRef.current) {
           await engineRef.current.exportPng(filename, targetWidth);
         }
+      },
+      projectVoxelToScreen: (x: number, y: number, z: number) => {
+        if (engineRef.current) return engineRef.current.projectVoxelToScreen(x, y, z);
+        return { x: 0, y: 0, visible: false };
       },
     }));
 
@@ -329,6 +366,34 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       sharedUniforms.uTime.value = 1.4;
       const materials: MaterialBank = createMaterialBank(sharedUniforms);
 
+      let shadowGrid: VoxelGrid | null | undefined;
+      const syncVoxelGrid = (grid: VoxelGrid | null) => {
+        if (grid === shadowGrid) return;
+        shadowGrid = grid;
+        sharedUniforms.uVoxelShadowTexture.value.dispose();
+        const emptyTexture = new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.RedFormat);
+        emptyTexture.needsUpdate = true;
+        sharedUniforms.uVoxelShadowTexture.value = emptyTexture;
+        sharedUniforms.uVoxelShadowsEnabled.value = 0;
+        if (grid) {
+          try {
+            const atlas = createVoxelShadowTexture(grid, renderer.capabilities.maxTextureSize);
+            emptyTexture.dispose();
+            sharedUniforms.uVoxelShadowTexture.value = atlas.texture;
+            sharedUniforms.uVoxelShadowAtlas.value.set(atlas.width, atlas.height, atlas.stride);
+            sharedUniforms.uVoxelGridSize.value.set(grid.width, grid.height, grid.depth);
+            sharedUniforms.uVoxelGridOffset.value.set(grid.width * 0.5, 0, grid.depth * 0.5);
+            sharedUniforms.uVoxelShadowsEnabled.value = 1;
+            shadowWarningRef.current(null);
+          } catch (error) {
+            shadowWarningRef.current(error instanceof Error ? error.message : 'Could not create voxel-light shadows. Lights will be unshadowed.');
+          }
+        } else {
+          shadowWarningRef.current(null);
+        }
+        requestRender();
+      };
+
       // Procedural Atmospheric Sky Dome
       const skyGeo = new THREE.SphereGeometry(5200, 32, 20);
       const skyMat = createSkyDomeMaterial(sharedUniforms);
@@ -420,6 +485,164 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       voxelMesh.visible = false;
       scene.add(voxelMesh);
 
+      // --- Voxel Lights (Special Effects) -----------------------------------
+      // Grid mapping: mesher centers X/Z at 0 and grounds Y at 0, so a voxel
+      // (x, y, z) center sits at (x + 0.5 - size.x/2, y + 0.5, z + 0.5 - size.z/2).
+      const gridSize = new THREE.Vector3(1, 1, 1);
+      const gridOffset = new THREE.Vector3(0.5, 0, 0.5);
+
+      const voxelToWorld = (x: number, y: number, z: number, out: THREE.Vector3) => {
+        out.set(x + 0.5 - gridOffset.x, y + 0.5 - gridOffset.y, z + 0.5 - gridOffset.z);
+        return out;
+      };
+
+      const markerGroup = new THREE.Group();
+      markerGroup.name = 'voxel-light-markers';
+      scene.add(markerGroup);
+
+      // A single instanced draw keeps the editor markers cheap even with many lights.
+      const markerGeo = new THREE.BoxGeometry(1.06, 1.06, 1.06);
+      const markerMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff, toneMapped: false, transparent: true, opacity: 0.45, depthWrite: false,
+      });
+      const markers = new THREE.InstancedMesh(markerGeo, markerMaterial, MAX_VOXEL_LIGHTS);
+      markers.count = 0;
+      markers.frustumCulled = false;
+      markerGroup.add(markers);
+      const markerMatrix = new THREE.Matrix4();
+      const markerPosition = new THREE.Vector3();
+      const markerColor = new THREE.Color();
+
+      const syncVoxelLights = () => {
+        const lights = voxelLightsRef.current;
+        sharedUniforms.uVoxelLightCount.value = updateVoxelLightTexture(
+          sharedUniforms.uVoxelLightTexture.value, lights, gridOffset,
+        );
+        markers.count = lights.length;
+        lights.forEach((light, i) => {
+          voxelToWorld(light.x, light.y, light.z, markerPosition);
+          const scale = light.intensity > 0.001 ? 1 : 0;
+          markerMatrix.makeScale(scale, scale, scale).setPosition(markerPosition);
+          markers.setMatrixAt(i, markerMatrix);
+          markers.setColorAt(i, markerColor.set(light.color));
+        });
+        markers.instanceMatrix.needsUpdate = true;
+        if (markers.instanceColor) markers.instanceColor.needsUpdate = true;
+        if (!pickingModeRef.current) hoverBox.visible = false;
+        requestRender();
+      };
+
+      // Hover highlight box (shown while picking a voxel)
+      const hoverBox = new THREE.LineSegments(
+        new THREE.EdgesGeometry(new THREE.BoxGeometry(1.04, 1.04, 1.04)),
+        new THREE.LineBasicMaterial({ color: '#E05A2B', toneMapped: false }),
+      );
+      hoverBox.visible = false;
+      hoverBox.frustumCulled = false;
+      scene.add(hoverBox);
+
+      const raycaster = new THREE.Raycaster();
+      const pointerNdc = new THREE.Vector2();
+      const hitPoint = new THREE.Vector3();
+      const hitNormal = new THREE.Vector3();
+      const hoverVoxel = new THREE.Vector3(-1, -1, -1);
+
+      const pickVoxelAt = (clientX: number, clientY: number): boolean => {
+        if (!voxelMesh.visible) return false;
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return false;
+        pointerNdc.set(
+          ((clientX - rect.left) / rect.width) * 2 - 1,
+          -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        raycaster.setFromCamera(pointerNdc, activeCamera);
+        const hits = raycaster.intersectObject(voxelMesh, false);
+        if (hits.length === 0) return false;
+        const hit = hits[0];
+        hitPoint.copy(hit.point);
+        if (hit.face && hit.face.normal) {
+          hitNormal.copy(hit.face.normal);
+        } else {
+          hitNormal.set(0, 1, 0);
+        }
+        // Step slightly inside the face so floor() lands on the solid voxel.
+        hitPoint.addScaledVector(hitNormal, -0.02);
+        const vx = Math.floor(hitPoint.x + gridOffset.x);
+        const vy = Math.floor(hitPoint.y + gridOffset.y);
+        const vz = Math.floor(hitPoint.z + gridOffset.z);
+        if (
+          vx < 0 || vy < 0 || vz < 0 ||
+          vx >= Math.round(gridSize.x) ||
+          vy >= Math.round(gridSize.y) ||
+          vz >= Math.round(gridSize.z)
+        ) {
+          return false;
+        }
+        hoverVoxel.set(vx, vy, vz);
+        voxelToWorld(vx, vy, vz, hoverBox.position);
+        hoverBox.visible = pickingModeRef.current;
+        onVoxelPickedRef.current(vx, vy, vz, [hitNormal.x, hitNormal.y, hitNormal.z]);
+        return true;
+      };
+
+      const updateHoverAt = (clientX: number, clientY: number) => {
+        if (!pickingModeRef.current || !voxelMesh.visible) {
+          hoverBox.visible = false;
+          return;
+        }
+        const rect = renderer.domElement.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) {
+          hoverBox.visible = false;
+          return;
+        }
+        pointerNdc.set(
+          ((clientX - rect.left) / rect.width) * 2 - 1,
+          -((clientY - rect.top) / rect.height) * 2 + 1,
+        );
+        raycaster.setFromCamera(pointerNdc, activeCamera);
+        const hits = raycaster.intersectObject(voxelMesh, false);
+        if (hits.length === 0) {
+          hoverBox.visible = false;
+          return;
+        }
+        const hit = hits[0];
+        hitPoint.copy(hit.point);
+        if (hit.face && hit.face.normal) hitNormal.copy(hit.face.normal);
+        else hitNormal.set(0, 1, 0);
+        hitPoint.addScaledVector(hitNormal, -0.02);
+        const vx = Math.floor(hitPoint.x + gridOffset.x);
+        const vy = Math.floor(hitPoint.y + gridOffset.y);
+        const vz = Math.floor(hitPoint.z + gridOffset.z);
+        if (
+          vx < 0 || vy < 0 || vz < 0 ||
+          vx >= Math.round(gridSize.x) ||
+          vy >= Math.round(gridSize.y) ||
+          vz >= Math.round(gridSize.z)
+        ) {
+          hoverBox.visible = false;
+          return;
+        }
+        hoverVoxel.set(vx, vy, vz);
+        voxelToWorld(vx, vy, vz, hoverBox.position);
+        hoverBox.visible = true;
+        requestRender();
+      };
+
+      const projectVoxelToScreen = (x: number, y: number, z: number) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        voxelToWorld(x, y, z, hitPoint);
+        const projected = hitPoint.clone().project(activeCamera);
+        const visible =
+          projected.z > -1 && projected.z < 1 &&
+          projected.x > -1.2 && projected.x < 1.2 &&
+          projected.y > -1.2 && projected.y < 1.2;
+        return {
+          x: rect.left + ((projected.x + 1) / 2) * rect.width,
+          y: rect.top + ((1 - projected.y) / 2) * rect.height,
+          visible,
+        };
+      };
+
       // Post-Processing Composer (GPU only; crisp high-threshold bloom)
       let composer: EffectComposer | null = null;
       let renderPass: RenderPass | null = null;
@@ -430,19 +653,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         composer = new EffectComposer(renderer);
         renderPass = new RenderPass(scene, activeCamera);
         composer.addPass(renderPass);
-
         bloomPass = new UnrealBloomPass(
-          new THREE.Vector2(width, height),
-          settingsRef.current.bloomStrength,
-          0.32,
-          0.94,
+          new THREE.Vector2(width, height), settingsRef.current.bloomStrength, 0.32, 0.94,
         );
         composer.addPass(bloomPass);
-
         studioPass = new ShaderPass(StudioPostShader);
         studioPass.uniforms.uResolution.value.set(width, height);
         composer.addPass(studioPass);
-
         composer.addPass(new OutputPass());
       }
 
@@ -506,11 +723,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       const drawFrame = () => {
         skyMesh.position.copy(activeCamera.position);
-        if (composer && !isSoftwareGl) {
-          composer.render();
-        } else {
-          renderer.render(scene, activeCamera);
-        }
+        if (composer && !isSoftwareGl) composer.render();
+        else renderer.render(scene, activeCamera);
       };
 
       function afterDraw(cb: () => void) {
@@ -767,11 +981,41 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         isFreeDragging = false;
       };
 
+      // Voxel-light picking: click (not drag) selects a voxel while picking.
+      let pickDownX = 0;
+      let pickDownY = 0;
+      const onPickPointerDown = (e: PointerEvent) => {
+        pickDownX = e.clientX;
+        pickDownY = e.clientY;
+      };
+      const onPickPointerUp = (e: PointerEvent) => {
+        if (!pickingModeRef.current) return;
+        if (e.button !== 0) return;
+        const moved = Math.hypot(e.clientX - pickDownX, e.clientY - pickDownY);
+        if (moved > 6) return;
+        pickVoxelAt(e.clientX, e.clientY);
+      };
+      const onPickPointerMove = (e: PointerEvent) => {
+        if (!pickingModeRef.current) return;
+        updateHoverAt(e.clientX, e.clientY);
+        requestRender();
+      };
+      const onPickPointerLeave = () => {
+        if (hoverBox.visible) {
+          hoverBox.visible = false;
+          requestRender();
+        }
+      };
+
       renderer.domElement.addEventListener('pointerdown', onPointerDown);
       renderer.domElement.addEventListener('contextmenu', onContextMenu);
       renderer.domElement.addEventListener('pointermove', onPointerMove);
       renderer.domElement.addEventListener('pointerup', onPointerUp);
       renderer.domElement.addEventListener('wheel', onWheel, { passive: false });
+      renderer.domElement.addEventListener('pointerdown', onPickPointerDown);
+      renderer.domElement.addEventListener('pointerup', onPickPointerUp);
+      renderer.domElement.addEventListener('pointermove', onPickPointerMove);
+      renderer.domElement.addEventListener('pointerleave', onPickPointerLeave);
       window.addEventListener('keydown', onKeyDown);
       window.addEventListener('keyup', onKeyUp);
       window.addEventListener('blur', onWindowBlur);
@@ -927,6 +1171,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
         if (!meshData) {
           voxelMesh.visible = false;
+          hoverBox.visible = false;
           renderer.shadowMap.needsUpdate = true;
           syncSettings();
           return;
@@ -935,6 +1180,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const oldGeo = voxelMesh.geometry;
         voxelMesh.geometry = meshData.geometry;
         oldGeo.dispose();
+
+        gridSize.copy(meshData.size);
+        gridOffset.set(meshData.size.x * 0.5, 0, meshData.size.z * 0.5);
 
         if (meshData.geometry.boundingBox) {
           modelBounds.copy(meshData.geometry.boundingBox);
@@ -992,12 +1240,24 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         });
 
       const exportPng = async (filename: string, targetWidth?: number) => {
+        // Hide editor-only helpers (light markers, pick highlight) from exports.
+        const savedMarkerVisible = markerGroup.visible;
+        const savedHoverVisible = hoverBox.visible;
+        markerGroup.visible = false;
+        hoverBox.visible = false;
+
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
 
         if (!targetWidth || targetWidth <= baseW) {
           drawFrame();
-          await downloadCanvasPng(renderer.domElement, filename);
+          try {
+            await downloadCanvasPng(renderer.domElement, filename);
+          } finally {
+            markerGroup.visible = savedMarkerVisible;
+            hoverBox.visible = savedHoverVisible;
+            drawFrame();
+          }
           return;
         }
 
@@ -1018,6 +1278,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           if (composer && !isSoftwareGl && targetW <= maxDirectDim && targetH <= maxDirectDim) {
             renderer.setPixelRatio(1);
             renderer.setSize(targetW, targetH, false);
+            composer.setPixelRatio(1);
             composer.setSize(targetW, targetH);
             if (bloomPass) bloomPass.resolution.set(targetW, targetH);
             if (studioPass) studioPass.uniforms.uResolution.value.set(targetW, targetH);
@@ -1064,12 +1325,15 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
           await downloadCanvasPng(outCanvas, filename);
         } finally {
+          markerGroup.visible = savedMarkerVisible;
+          hoverBox.visible = savedHoverVisible;
           activeCamera.clearViewOffset();
           renderer.setPixelRatio(savedPixelRatio);
           renderer.setSize(savedCssSize.x, savedCssSize.y, false);
           if (composer) {
             const fullW = Math.max(1, Math.round(savedCssSize.x * savedPixelRatio));
             const fullH = Math.max(1, Math.round(savedCssSize.y * savedPixelRatio));
+            composer.setPixelRatio(savedPixelRatio);
             composer.setSize(savedCssSize.x, savedCssSize.y);
             if (bloomPass) bloomPass.resolution.set(fullW, fullH);
             if (studioPass) studioPass.uniforms.uResolution.value.set(fullW, fullH);
@@ -1082,12 +1346,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         applyPreset,
         syncMesh,
         syncSettings,
+        syncVoxelLights,
+        syncVoxelGrid,
         getDisplayResolution,
         exportPng,
+        projectVoxelToScreen,
       };
 
       if (builtMeshRef.current) {
         syncMesh(builtMeshRef.current, true);
+        syncVoxelGrid(voxelGridRef.current);
+        syncVoxelLights();
       } else {
         syncSettings();
         applyPreset('low', true);
@@ -1131,12 +1400,23 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         renderer.domElement.removeEventListener('pointermove', onPointerMove);
         renderer.domElement.removeEventListener('pointerup', onPointerUp);
         renderer.domElement.removeEventListener('wheel', onWheel);
+        renderer.domElement.removeEventListener('pointerdown', onPickPointerDown);
+        renderer.domElement.removeEventListener('pointerup', onPickPointerUp);
+        renderer.domElement.removeEventListener('pointermove', onPickPointerMove);
+        renderer.domElement.removeEventListener('pointerleave', onPickPointerLeave);
         controls.removeEventListener('start', cancelCamAnim);
         controls.dispose();
         renderer.domElement.removeEventListener('webglcontextlost', handleContextLost);
         renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
 
         voxelMesh.geometry.dispose();
+        markers.dispose();
+        markerGeo.dispose();
+        markerMaterial.dispose();
+        sharedUniforms.uVoxelLightTexture.value.dispose();
+        sharedUniforms.uVoxelShadowTexture.value.dispose();
+        hoverBox.geometry.dispose();
+        (hoverBox.material as THREE.Material).dispose();
         materials.dispose();
         skyGeo.dispose();
         skyMat.dispose();
@@ -1171,6 +1451,21 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       engineRef.current?.syncSettings();
     }, [settings]);
 
+    useEffect(() => {
+      engineRef.current?.syncVoxelGrid(voxelGrid);
+    }, [voxelGrid]);
+
+    useEffect(() => {
+      engineRef.current?.syncVoxelLights();
+    }, [voxelLights]);
+
+    useEffect(() => {
+      // Leaving pick mode clears the hover highlight.
+      if (!pickingMode) {
+        engineRef.current?.syncVoxelLights();
+      }
+    }, [pickingMode]);
+
     return (
       <div
         className="relative w-full h-full overflow-hidden"
@@ -1191,7 +1486,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         <div
           ref={mountRef}
           data-testid="voxel-canvas-mount"
-          className="w-full h-full cursor-grab active:cursor-grabbing"
+          className={`w-full h-full ${pickingMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
         />
 
         {contextLost && (

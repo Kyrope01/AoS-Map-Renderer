@@ -3,8 +3,10 @@ import {
   CloudSun,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   Waves,
   X,
+  Zap,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import * as THREE from 'three';
@@ -12,12 +14,14 @@ import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/
 import {
   BackdropPreset,
   FogMode,
+  MAX_VOXEL_LIGHTS,
   MeshStats,
   RenderSettings,
   SliceAxis,
+  VoxelLight,
 } from '../voxel/types';
 
-type SidebarTab = 'shaders' | 'material' | 'atmosphere' | 'camera';
+type SidebarTab = 'effects' | 'shaders' | 'material' | 'atmosphere' | 'camera';
 
 interface ControlSidebarProps {
   settings: RenderSettings;
@@ -26,6 +30,14 @@ interface ControlSidebarProps {
   onToggleCollapse: () => void;
   onUpdateSettings: (patch: Partial<RenderSettings>) => void;
   onResetDefaults: () => void;
+  voxelLights: VoxelLight[];
+  shadowWarning: string | null;
+  pickingLight: boolean;
+  selectedLightId: string | null;
+  onStartPickLight: () => void;
+  onSelectLight: (id: string | null) => void;
+  onRemoveLight: (id: string) => void;
+  onClearLights: () => void;
 }
 
 const SUN_SWATCHES = [
@@ -309,8 +321,17 @@ export function ControlSidebar({
   onToggleCollapse,
   onUpdateSettings,
   onResetDefaults,
+  voxelLights,
+  shadowWarning,
+  pickingLight,
+  selectedLightId,
+  onStartPickLight,
+  onSelectLight,
+  onRemoveLight,
+  onClearLights,
 }: ControlSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('shaders');
+  const [lightsOpen, setLightsOpen] = useState(false);
 
   const panelSurface = 'bg-[#14171D]/94 text-[#F3F1EC] border-white/10';
   const dividerClass = 'border-white/8';
@@ -324,6 +345,7 @@ export function ControlSidebar({
 
   const tabs: { id: SidebarTab; label: string; icon: typeof Sparkles }[] = [
     { id: 'shaders', label: 'Shaders', icon: Sparkles },
+    { id: 'effects', label: 'Special Effects', icon: Zap },
     { id: 'material', label: 'Material', icon: SlidersHorizontal },
     { id: 'atmosphere', label: 'Sky & Fog', icon: CloudSun },
     { id: 'camera', label: 'Camera', icon: Camera },
@@ -378,7 +400,7 @@ export function ControlSidebar({
       </div>
 
       {/* Tab Switcher */}
-      <div className={`grid grid-cols-4 gap-1 p-1.5 border-b ${dividerClass}`} role="tablist">
+      <div className={`grid grid-cols-5 gap-1 p-1.5 border-b ${dividerClass}`} role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           const isSelected = activeTab === tab.id;
@@ -396,7 +418,7 @@ export function ControlSidebar({
               }`}
             >
               <Icon className="w-3.5 h-3.5" aria-hidden="true" />
-              <span className="whitespace-nowrap">{tab.label}</span>
+              <span className="text-center leading-tight">{tab.label}</span>
             </button>
           );
         })}
@@ -404,6 +426,129 @@ export function ControlSidebar({
 
       {/* Scrollable Tab Body */}
       <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-4">
+        {activeTab === 'effects' && (
+          <div className="space-y-4">
+            <button
+              type="button"
+              aria-expanded={lightsOpen}
+              onClick={() => setLightsOpen((open) => !open)}
+              className={`w-full px-3 py-2 rounded-md border text-xs font-semibold transition-colors cursor-pointer ${lightsOpen ? activeBtn : inactiveBtn}`}
+            >
+              Voxel Lights
+            </button>
+            {lightsOpen && (
+              <div className="p-3 rounded-md border border-white/10 bg-white/5 space-y-2.5">
+                <div className={`text-[10px] text-right tabular-nums ${mutedText}`}>
+                  {voxelLights.length} / {MAX_VOXEL_LIGHTS} lights
+                </div>
+              <button
+                type="button"
+                disabled={!stats || pickingLight || voxelLights.length >= MAX_VOXEL_LIGHTS}
+                onClick={onStartPickLight}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border text-xs font-semibold transition-colors ${
+                  pickingLight
+                    ? 'bg-[#E05A2B] text-white border-[#E05A2B] cursor-wait'
+                    : !stats || voxelLights.length >= MAX_VOXEL_LIGHTS
+                      ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
+                      : 'bg-[#E05A2B] text-white border-[#E05A2B] hover:bg-[#C94D22] cursor-pointer'
+                }`}
+                title={
+                  !stats
+                    ? 'Import a .vxl map or .kv6 model first'
+                    : voxelLights.length >= MAX_VOXEL_LIGHTS
+                      ? `Maximum of ${MAX_VOXEL_LIGHTS} voxel lights`
+                    : pickingLight
+                      ? 'Click a voxel in the viewport to place the light'
+                      : 'Click, then click any voxel in the viewport to make it a light source'
+                }
+              >
+                <span>{pickingLight ? 'Click a voxel…' : 'Pick a Voxel Light'}</span>
+              </button>
+
+              {shadowWarning && <p role="alert" className="text-[11px] leading-relaxed text-amber-300">{shadowWarning}</p>}
+              {stats && !shadowWarning && voxelLights.length > 0 && (
+                <p className={`text-[10px] leading-relaxed ${mutedText}`}>
+                  Lights cast voxel shadows. Many lights or large ranges can slow rendering.
+                </p>
+              )}
+              {!stats && (
+                <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                  Import a map or model first — then pick any voxel to turn it into a
+                  light source.
+                </p>
+              )}
+              {voxelLights.length >= MAX_VOXEL_LIGHTS && (
+                <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                  Maximum of {MAX_VOXEL_LIGHTS} lights reached. Remove one to add another.
+                </p>
+              )}
+              {stats && voxelLights.length === 0 && !pickingLight && (
+                <p className={`text-[11px] leading-relaxed ${mutedText}`}>
+                  No voxel lights yet. Pick a voxel and its intensity controls appear
+                  right next to it in the viewport.
+                </p>
+              )}
+
+              {voxelLights.length > 0 && (
+                <div className="space-y-1.5">
+                  {voxelLights.map((light) => {
+                    const isSelected = selectedLightId === light.id;
+                    return (
+                      <div
+                        key={light.id}
+                        className={`flex items-center gap-2 px-2 py-1.5 rounded-md border transition-colors ${
+                          isSelected
+                            ? 'border-[#E05A2B] bg-[#E05A2B]/10'
+                            : 'border-white/10 bg-white/5'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => onSelectLight(isSelected ? null : light.id)}
+                          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
+                          title="Show intensity controls next to this voxel"
+                        >
+                          <span
+                            className="w-3 h-3 rounded-sm border border-white/25 shrink-0"
+                            style={{ backgroundColor: light.color }}
+                            aria-hidden="true"
+                          />
+                          <span className="min-w-0">
+                            <span className="block text-[11px] font-semibold text-[#D4DAE4] truncate">
+                              Voxel {light.x}, {light.y}, {light.z}
+                            </span>
+                            <span className={`block font-mono-tabular text-[10px] ${mutedText}`}>
+                              {light.intensity.toFixed(1)}× · range {Math.round(light.range)}
+                            </span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onRemoveLight(light.id)}
+                          aria-label={`Remove light at voxel ${light.x}, ${light.y}, ${light.z}`}
+                          title="Remove this light"
+                          className="p-1 rounded text-[#8F98A6] hover:text-red-300 hover:bg-white/10 transition-colors cursor-pointer shrink-0"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+                        </button>
+                      </div>
+                    );
+                  })}
+
+                  <button
+                    type="button"
+                    onClick={onClearLights}
+                    className={`w-full px-2 py-1 rounded border text-[10px] font-medium transition-colors cursor-pointer ${inactiveBtn}`}
+                  >
+                    Clear all voxel lights
+                  </button>
+                </div>
+              )}
+              </div>
+            )}
+          </div>
+        )}
+
         {activeTab === 'shaders' && (
           <div className="space-y-4">
             {SHADER_CATEGORIES.map((category, idx) => {
@@ -568,9 +713,7 @@ export function ControlSidebar({
                           aria-hidden="true"
                         />
                         <span className="truncate">
-                          {isCustom
-                            ? settings.customSkyName.trim() || 'Custom Sky'
-                            : theme.label}
+                          {isCustom ? 'Custom Sky' : theme.label}
                         </span>
                       </div>
                     </button>
@@ -581,26 +724,9 @@ export function ControlSidebar({
               {/* Custom Sky Configuration Panel (active when Custom Sky is selected) */}
               {settings.backdrop === 'custom' && (
                 <div className="p-3 rounded-md border border-white/10 bg-white/5 space-y-3 mt-2">
-                  {/* Sky Name Input */}
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <label
-                        htmlFor="custom-sky-name-input"
-                        className="font-medium text-[#B8C0CC]"
-                      >
-                        Sky Name
-                      </label>
-                      <span className="text-[10px] text-[#8992A2]">Custom Preset</span>
-                    </div>
-                    <input
-                      id="custom-sky-name-input"
-                      type="text"
-                      value={settings.customSkyName}
-                      onChange={(e) => onUpdateSettings({ customSkyName: e.target.value })}
-                      placeholder="Custom Sky"
-                      maxLength={24}
-                      className="w-full px-2.5 py-1.5 rounded border border-white/10 bg-[#101318] text-xs font-medium text-[#F3F1EC] placeholder-[#6B7280] focus:outline-none focus:border-[#E05A2B] transition-colors"
-                    />
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-[#D4DAE4]">Custom Sky</span>
+                    <span className="text-[10px] text-[#8992A2]">Custom Preset</span>
                   </div>
 
                   {/* Zenith Color Selector (ABOVE Horizon) */}
