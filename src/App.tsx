@@ -7,7 +7,6 @@ import { VoxelViewport, VoxelViewportHandle } from './renderer/VoxelViewport';
 import { parseKv6 } from './voxel/kv6Parser';
 import { buildVoxelGeometry, BuiltVoxelMesh } from './voxel/mesher';
 import {
-  CameraPreset,
   MeshStats,
   RenderSettings,
   VoxelFormat,
@@ -23,7 +22,6 @@ const DEFAULT_SETTINGS: RenderSettings = {
   roughness: 0.55,
   metalness: 0.06,
   outlineStrength: 0,
-  matcapStyle: 'chrome',
   sliceAxis: 'none',
   slicePosition: 0.65,
   lightAzimuth: 130,
@@ -214,11 +212,27 @@ export default function App() {
             cameraMode: settings.cameraMode === 'orbit' ? 'free' : 'orbit',
           })
         }
-        onExportPng={() => {
-          if (!loadedModel) return;
-          viewportRef.current?.exportPng(
-            `${loadedModel.name.toLowerCase().replace(/\s+/g, '-')}-${settings.shaderMode}.png`,
-          );
+        getDisplayResolution={() =>
+          viewportRef.current?.getDisplayResolution() ?? {
+            width: window.innerWidth,
+            height: window.innerHeight,
+          }
+        }
+        onExportPng={async (targetWidth?: number) => {
+          if (!loadedModel || !viewportRef.current) return;
+          const suffix = targetWidth ? `-${targetWidth}w` : '';
+          try {
+            await viewportRef.current.exportPng(
+              `${loadedModel.name.toLowerCase().replace(/\s+/g, '-')}-${settings.shaderMode}${suffix}.png`,
+              targetWidth,
+            );
+          } catch (err) {
+            setErrorMsg(
+              err instanceof Error
+                ? err.message
+                : 'PNG export failed at this resolution.',
+            );
+          }
         }}
         onToggleSidebar={() => setSidebarCollapsed((prev) => !prev)}
       />
@@ -283,9 +297,6 @@ export default function App() {
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
         onUpdateSettings={updateSettings}
-        onSelectCamera={(preset: CameraPreset) =>
-          viewportRef.current?.applyCameraPreset(preset)
-        }
         onResetDefaults={() => setSettings(DEFAULT_SETTINGS)}
       />
     </main>

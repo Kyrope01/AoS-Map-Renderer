@@ -10,9 +10,7 @@ import { useState } from 'react';
 import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/shaders';
 import {
   BackdropPreset,
-  CameraPreset,
   FogMode,
-  MatcapStyle,
   MeshStats,
   RenderSettings,
   SliceAxis,
@@ -26,16 +24,8 @@ interface ControlSidebarProps {
   collapsed: boolean;
   onToggleCollapse: () => void;
   onUpdateSettings: (patch: Partial<RenderSettings>) => void;
-  onSelectCamera: (preset: CameraPreset) => void;
   onResetDefaults: () => void;
 }
-
-const MATCAP_STYLES: { id: MatcapStyle; label: string }[] = [
-  { id: 'chrome', label: 'Chrome' },
-  { id: 'pearl', label: 'Pearl' },
-  { id: 'terracotta', label: 'Terracotta' },
-  { id: 'jade', label: 'Jade' },
-];
 
 const SUN_SWATCHES = [
   { label: 'Daylight', hex: '#FFF6E8' },
@@ -43,14 +33,6 @@ const SUN_SWATCHES = [
   { label: 'Sunset', hex: '#FF9068' },
   { label: 'Overcast', hex: '#DCEBFF' },
   { label: 'Moonlight', hex: '#B5D2FF' },
-];
-
-const CAMERA_PRESETS: { id: CameraPreset; label: string }[] = [
-  { id: 'iso', label: 'Iso' },
-  { id: 'front', label: 'Front' },
-  { id: 'side', label: 'Side' },
-  { id: 'top', label: 'Top' },
-  { id: 'low', label: 'Low' },
 ];
 
 const FOG_MODES: { id: FogMode; label: string }[] = [
@@ -116,7 +98,6 @@ export function ControlSidebar({
   collapsed,
   onToggleCollapse,
   onUpdateSettings,
-  onSelectCamera,
   onResetDefaults,
 }: ControlSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('shaders');
@@ -249,28 +230,6 @@ export function ControlSidebar({
                       );
                     })}
                   </div>
-
-                  {category.id === 'sculpt' && settings.shaderMode === 'matcap' && (
-                    <div className={`pt-2 space-y-1.5`}>
-                      <span className={`block text-[11px] font-medium ${mutedText}`}>
-                        MatCap Finish
-                      </span>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        {MATCAP_STYLES.map((m) => (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => onUpdateSettings({ matcapStyle: m.id })}
-                            className={`px-2 py-1.5 rounded border text-[11px] font-medium transition-colors cursor-pointer ${
-                              settings.matcapStyle === m.id ? activeBtn : inactiveBtn
-                            }`}
-                          >
-                            {m.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               );
             })}
@@ -717,22 +676,6 @@ export function ControlSidebar({
             </div>
 
             <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-              <span className={sectionLabel}>Framing</span>
-              <div className="grid grid-cols-5 gap-1">
-                {CAMERA_PRESETS.map((cam) => (
-                  <button
-                    key={cam.id}
-                    type="button"
-                    onClick={() => onSelectCamera(cam.id)}
-                    className={`py-1.5 rounded border text-[11px] font-medium transition-colors cursor-pointer ${inactiveBtn}`}
-                  >
-                    {cam.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
               <span className={sectionLabel}>View Options</span>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
@@ -814,7 +757,7 @@ export function ControlSidebar({
               />
               <SliderControl
                 id="post-chromatic"
-                label="Chromatic"
+                label="Chromatic Aberration"
                 value={settings.chromatic}
                 min={0}
                 max={1}

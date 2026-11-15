@@ -9,6 +9,10 @@ import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { BuiltVoxelMesh } from '../voxel/mesher';
+import {
+  computeExportTiles,
+  computeUpscaledDimensions,
+} from '../voxel/exportResolution';
 import { CameraPreset, RenderSettings } from '../voxel/types';
 import {
   BACKDROP_THEMES,
@@ -23,7 +27,8 @@ import {
 
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
-  exportPng: (filename: string) => void;
+  getDisplayResolution: () => { width: number; height: number };
+  exportPng: (filename: string, targetWidth?: number) => Promise<void>;
 }
 
 interface VoxelViewportProps {
@@ -161,15 +166,25 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       applyPreset: (preset: CameraPreset, instant?: boolean) => void;
       syncMesh: (meshData: BuiltVoxelMesh | null, instantCamera?: boolean) => void;
       syncSettings: () => void;
-      exportPng: (filename: string) => void;
+      getDisplayResolution: () => { width: number; height: number };
+      exportPng: (filename: string, targetWidth?: number) => Promise<void>;
     } | null>(null);
 
     useImperativeHandle(ref, () => ({
       applyCameraPreset: (preset: CameraPreset) => {
         engineRef.current?.applyPreset(preset, false);
       },
-      exportPng: (filename: string) => {
-        engineRef.current?.exportPng(filename);
+      getDisplayResolution: () => {
+        if (engineRef.current) return engineRef.current.getDisplayResolution();
+        return {
+          width: Math.max(1, Math.round((mountRef.current?.clientWidth || window.innerWidth) * Math.min(window.devicePixelRatio || 1, 2))),
+          height: Math.max(1, Math.round((mountRef.current?.clientHeight || window.innerHeight) * Math.min(window.devicePixelRatio || 1, 2))),
+        };
+      },
+      exportPng: async (filename: string, targetWidth?: number) => {
+        if (engineRef.current) {
+          await engineRef.current.exportPng(filename, targetWidth);
+        }
       },
     }));
 
@@ -949,21 +964,122 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         applyPreset('iso', instantCamera);
       };
 
-      const exportPng = (filename: string) => {
-        drawFrame();
-        const dataUrl = renderer.domElement.toDataURL('image/png');
-        const a = document.createElement('a');
-        a.href = dataUrl;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
+      const getDisplayResolution = () => ({
+        width: Math.max(1, renderer.domElement.width),
+        height: Math.max(1, renderer.domElement.height),
+      });
+
+      const downloadCanvasPng = (canvas: HTMLCanvasElement, filename: string): Promise<void> =>
+        new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => {
+            if (!blob) {
+              reject(new Error('Failed to encode PNG image at this resolution.'));
+              return;
+            }
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+            resolve();
+          }, 'image/png');
+        });
+
+      const exportPng = async (filename: string, targetWidth?: number) => {
+        const baseW = Math.max(1, renderer.domElement.width);
+        const baseH = Math.max(1, renderer.domElement.height);
+
+        if (!targetWidth || targetWidth <= baseW) {
+          drawFrame();
+          await downloadCanvasPng(renderer.domElement, filename);
+          return;
+        }
+
+        const dims = computeUpscaledDimensions(baseW, baseH, targetWidth);
+        const targetW = dims.width;
+        const targetH = dims.height;
+
+        const savedPixelRatio = renderer.getPixelRatio();
+        const savedCssSize = new THREE.Vector2();
+        renderer.getSize(savedCssSize);
+
+        const gl = renderer.getContext();
+        const maxTex = (gl.getParameter(gl.MAX_TEXTURE_SIZE) as number) || 4096;
+        const maxRb = (gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number) || 4096;
+        const maxDirectDim = isSoftwareGl ? 1280 : Math.min(4096, maxTex, maxRb);
+
+        try {
+          if (composer && !isSoftwareGl && targetW <= maxDirectDim && targetH <= maxDirectDim) {
+            renderer.setPixelRatio(1);
+            renderer.setSize(targetW, targetH, false);
+            composer.setSize(targetW, targetH);
+            if (bloomPass) bloomPass.resolution.set(targetW, targetH);
+            if (studioPass) studioPass.uniforms.uResolution.value.set(targetW, targetH);
+            drawFrame();
+            await downloadCanvasPng(renderer.domElement, filename);
+            return;
+          }
+
+          const outCanvas = document.createElement('canvas');
+          outCanvas.width = targetW;
+          outCanvas.height = targetH;
+          const outCtx = outCanvas.getContext('2d');
+          if (!outCtx) {
+            throw new Error('Could not allocate upscaled export buffer at this resolution.');
+          }
+
+          const tileCap = isSoftwareGl ? 1024 : Math.min(2048, maxTex, maxRb);
+          const tiles = computeExportTiles(targetW, targetH, tileCap);
+
+          renderer.setPixelRatio(1);
+          for (let i = 0; i < tiles.length; i++) {
+            const tile = tiles[i];
+            renderer.setSize(tile.width, tile.height, false);
+            activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
+            skyMesh.position.copy(activeCamera.position);
+            renderer.render(scene, activeCamera);
+            outCtx.drawImage(renderer.domElement, tile.x, tile.y);
+            if (i % 4 === 3) {
+              await new Promise((r) => window.setTimeout(r, 0));
+            }
+          }
+
+          const vigStrength = settingsRef.current.vignette;
+          if (vigStrength > 0.001) {
+            const cx = targetW * 0.5;
+            const cy = targetH * 0.5;
+            const maxR = Math.hypot(cx, cy);
+            const grad = outCtx.createRadialGradient(cx, cy, maxR * 0.32, cx, cy, maxR);
+            grad.addColorStop(0, 'rgba(0,0,0,0)');
+            grad.addColorStop(1, `rgba(0,0,0,${(vigStrength * 0.55).toFixed(3)})`);
+            outCtx.fillStyle = grad;
+            outCtx.fillRect(0, 0, targetW, targetH);
+          }
+
+          await downloadCanvasPng(outCanvas, filename);
+        } finally {
+          activeCamera.clearViewOffset();
+          renderer.setPixelRatio(savedPixelRatio);
+          renderer.setSize(savedCssSize.x, savedCssSize.y, false);
+          if (composer) {
+            const fullW = Math.max(1, Math.round(savedCssSize.x * savedPixelRatio));
+            const fullH = Math.max(1, Math.round(savedCssSize.y * savedPixelRatio));
+            composer.setSize(savedCssSize.x, savedCssSize.y);
+            if (bloomPass) bloomPass.resolution.set(fullW, fullH);
+            if (studioPass) studioPass.uniforms.uResolution.value.set(fullW, fullH);
+          }
+          drawFrame();
+        }
       };
 
       engineRef.current = {
         applyPreset,
         syncMesh,
         syncSettings,
+        getDisplayResolution,
         exportPng,
       };
 

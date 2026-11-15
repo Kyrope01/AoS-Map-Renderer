@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import {
   BackdropPreset,
   FogMode,
-  MatcapStyle,
   RenderSettings,
   ShaderCategory,
   ShaderMode,
@@ -96,11 +95,11 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
   },
   graphite: {
     id: 'graphite',
-    label: 'Graphite Studio',
-    bgHex: '#14171D',
-    zenithHex: '#181C24',
-    horizonHex: '#14171D',
-    fogHex: '#14171D',
+    label: 'Pitch Black',
+    bgHex: '#000000',
+    zenithHex: '#000000',
+    horizonHex: '#000000',
+    fogHex: '#000000',
     fogDensity: 0.0022,
     skyHex: '#DCE6F5',
     groundHex: '#2B2825',
@@ -133,7 +132,6 @@ export interface ShaderPresetMeta {
 
 export const SHADER_CATEGORIES: { id: ShaderCategory; label: string }[] = [
   { id: 'cinematic', label: 'Map & Cinematic' },
-  { id: 'sculpt', label: 'Sculpt & Studio' },
 ];
 
 export const SHADER_PRESETS: ShaderPresetMeta[] = [
@@ -143,9 +141,6 @@ export const SHADER_PRESETS: ShaderPresetMeta[] = [
   { id: 'diorama', category: 'cinematic', label: 'Diorama', description: 'Crisp miniature model bounce' },
   { id: 'voxlap', category: 'cinematic', label: 'Voxlap 2011', description: 'Classic AoS face shading' },
   { id: 'rim', category: 'cinematic', label: 'Chiaroscuro', description: 'Warm key light & cool rim' },
-
-  { id: 'ao', category: 'sculpt', label: 'AO Ambient', description: 'Pure ambient occlusion pass' },
-  { id: 'matcap', category: 'sculpt', label: 'Studio MatCap', description: 'Spherical studio reflections' },
 ];
 
 export interface SharedShaderUniforms {
@@ -154,7 +149,6 @@ export interface SharedShaderUniforms {
   uOutlineStrength: { value: number };
   uRoughness: { value: number };
   uMetalness: { value: number };
-  uMatcapIndex: { value: number };
   uModelRadius: { value: number };
   uModelHeight: { value: number };
   uSliceAxis: { value: number };
@@ -185,7 +179,6 @@ export function createSharedUniforms(): SharedShaderUniforms {
     uOutlineStrength: { value: 0.0 },
     uRoughness: { value: 0.55 },
     uMetalness: { value: 0.06 },
-    uMatcapIndex: { value: 0 },
     uModelRadius: { value: 120 },
     uModelHeight: { value: 64 },
     uSliceAxis: { value: 0 },
@@ -210,13 +203,6 @@ export function createSharedUniforms(): SharedShaderUniforms {
   };
 }
 
-const MATCAP_INDEX: Record<MatcapStyle, number> = {
-  chrome: 0,
-  pearl: 1,
-  terracotta: 2,
-  jade: 3,
-};
-
 const FOG_MODE_INDEX: Record<FogMode, number> = {
   atmospheric: 0,
   ingame: 1,
@@ -235,7 +221,6 @@ export function syncSharedUniforms(
   uniforms.uOutlineStrength.value = settings.outlineStrength;
   uniforms.uRoughness.value = settings.roughness;
   uniforms.uMetalness.value = settings.metalness;
-  uniforms.uMatcapIndex.value = MATCAP_INDEX[settings.matcapStyle];
   uniforms.uLightDir.value.copy(lightDir);
   uniforms.uLightColor.value.copy(lightColor);
   uniforms.uLightIntensity.value = settings.lightIntensity;
@@ -792,7 +777,6 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
   uniform float uOutlineStrength;
   uniform float uRoughness;
   uniform float uMetalness;
-  uniform int uMatcapIndex;
   uniform int uSliceAxis;
   uniform float uSliceCoord;
   uniform vec3 uLightDir;
@@ -942,31 +926,6 @@ function makeStylizedShader(
         #include <colorspace_fragment>
       }
     `;
-  } else if (mode === 'ao') {
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float ao = pow(mix(1.0, vAo, clamp(uAoStrength * 1.25, 0.0, 1.5)), 1.25);
-
-        float hemi = dot(N, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
-        float sun = max(0.0, dot(N, L)) * 0.35 + 0.65;
-        vec3 col = mix(vec3(0.58, 0.60, 0.64), vec3(0.96, 0.95, 0.93), hemi) * sun * ao;
-
-        if (uOutlineStrength > 0.001) {
-          float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.08), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.85);
-        }
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
   } else if (mode === 'voxlap') {
     body = /* glsl */ `
       void main() {
@@ -990,56 +949,6 @@ function makeStylizedShader(
           vec3 V = normalize(vViewPos);
           float rim = 1.0 - abs(dot(VN, V));
           col = mix(col, vec3(0.02, 0.02, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
-        }
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'matcap') {
-    body = /* glsl */ `
-      vec3 evalMatcap(vec2 mUv, int style) {
-        vec2 p = mUv * 2.0 - 1.0;
-        float r2 = dot(p, p);
-        float z = sqrt(max(0.0, 1.0 - r2));
-        vec3 n = normalize(vec3(p.x, p.y, z));
-
-        float key = pow(max(0.0, dot(n, normalize(vec3(0.45, 0.68, 0.58)))), 14.0);
-        float fill = max(0.0, dot(n, normalize(vec3(-0.7, 0.25, 0.55))));
-        float rim = pow(1.0 - max(0.0, n.z), 3.0);
-        float horizon = smoothstep(-0.18, 0.12, n.y);
-
-        if (style == 0) {
-          vec3 sky = mix(vec3(0.14, 0.16, 0.21), vec3(0.82, 0.88, 0.96), horizon);
-          return sky + vec3(1.0, 0.98, 0.95) * key * 1.3 + vec3(0.35, 0.48, 0.72) * rim * 0.55;
-        } else if (style == 1) {
-          vec3 base = mix(vec3(0.62, 0.60, 0.68), vec3(0.95, 0.94, 0.92), horizon * 0.7 + fill * 0.3);
-          vec3 irid = 0.5 + 0.5 * cos(vec3(0.0, 2.1, 4.2) + n.x * 2.2 + n.y * 1.8);
-          return mix(base, irid, rim * 0.45) + vec3(1.0) * key * 0.9;
-        } else if (style == 2) {
-          vec3 base = mix(vec3(0.28, 0.12, 0.08), vec3(0.76, 0.38, 0.24), horizon * 0.6 + fill * 0.4);
-          return base + vec3(1.0, 0.82, 0.68) * key * 0.45 + vec3(0.95, 0.55, 0.35) * rim * 0.3;
-        } else {
-          vec3 base = mix(vec3(0.04, 0.11, 0.09), vec3(0.18, 0.46, 0.38), horizon * 0.65 + fill * 0.35);
-          return base + vec3(0.75, 1.0, 0.88) * key * 1.1 + vec3(0.28, 0.78, 0.64) * rim * 0.55;
-        }
-      }
-
-      void main() {
-        applySliceClip();
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-        vec2 mUv = clamp(VN.xy * 0.48 + 0.5, 0.02, 0.98);
-        vec3 mc = evalMatcap(mUv, uMatcapIndex);
-
-        float ao = mix(1.0, vAo, uAoStrength);
-        vec3 tinted = mix(mc, mc * (vColor * 1.35 + vec3(0.15)), 1.0 - uMetalness * 0.75);
-        vec3 col = tinted * ao * (0.7 + uLightIntensity * 0.28);
-
-        if (uOutlineStrength > 0.001) {
-          float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.02, 0.025, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.85);
         }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
@@ -1089,10 +998,8 @@ export interface MaterialBank {
   atmospheric: THREE.ShaderMaterial;
   diorama: THREE.ShaderMaterial;
   cinema: THREE.ShaderMaterial;
-  ao: THREE.ShaderMaterial;
   voxlap: THREE.ShaderMaterial;
   rim: THREE.ShaderMaterial;
-  matcap: THREE.ShaderMaterial;
   dispose: () => void;
 }
 
@@ -1101,29 +1008,23 @@ export function createMaterialBank(shared: SharedShaderUniforms): MaterialBank {
   const atmospheric = makeStylizedShader('atmospheric', shared);
   const diorama = makeStylizedShader('diorama', shared);
   const cinema = makeStylizedShader('cinema', shared);
-  const ao = makeStylizedShader('ao', shared);
   const voxlap = makeStylizedShader('voxlap', shared);
   const rim = makeStylizedShader('rim', shared);
-  const matcap = makeStylizedShader('matcap', shared);
 
   return {
     pbr,
     atmospheric,
     diorama,
     cinema,
-    ao,
     voxlap,
     rim,
-    matcap,
     dispose: () => {
       pbr.dispose();
       atmospheric.dispose();
       diorama.dispose();
       cinema.dispose();
-      ao.dispose();
       voxlap.dispose();
       rim.dispose();
-      matcap.dispose();
     },
   };
 }

@@ -28,17 +28,15 @@ export interface RegionBounds {
   maxZ: number;
 }
 
-export type ShaderCategory = 'cinematic' | 'sculpt';
+export type ShaderCategory = 'cinematic';
 
 export type ShaderMode =
   | 'pbr'
   | 'atmospheric'
   | 'diorama'
   | 'cinema'
-  | 'ao'
   | 'voxlap'
-  | 'rim'
-  | 'matcap';
+  | 'rim';
 
 export type BackdropPreset =
   | 'overcast'
@@ -57,8 +55,6 @@ export type FogMode = 'ingame' | 'atmospheric';
 
 export type SliceAxis = 'none' | 'x' | 'y' | 'z';
 
-export type MatcapStyle = 'chrome' | 'pearl' | 'terracotta' | 'jade';
-
 export interface RenderSettings {
   shaderMode: ShaderMode;
   backdrop: BackdropPreset;
@@ -67,7 +63,6 @@ export interface RenderSettings {
   roughness: number;        // 0.05..1.0
   metalness: number;        // 0..1.0
   outlineStrength: number;  // 0..1.0
-  matcapStyle: MatcapStyle;
   // Cross-section slicing
   sliceAxis: SliceAxis;
   slicePosition: number;    // 0..1.0 normalized

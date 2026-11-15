@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 import { encodeKv6, parseKv6 } from './kv6Parser';
 import { encodeVxl, parseVxl } from './vxlParser';
 import { buildVoxelGeometry } from './mesher';
+import {
+  computeExportTiles,
+  computeUpscaledDimensions,
+  formatResolutionLabel,
+  MAX_EXPORT_LONG_EDGE,
+} from './exportResolution';
 import { VoxelParseError } from './types';
 
 test('kv6 encode -> parse round-trip preserves dimensions, voxels, and BGR->RGB colors', () => {
@@ -175,3 +181,28 @@ test('full 512x512x64 standard headerless AoS .vxl parses and meshes quickly', (
   assert.ok(built.quadCount > 1000);
   built.geometry.dispose();
 });
+
+test('upscaled export dimensions preserve aspect ratio from display res up to 16K', () => {
+  const same = computeUpscaledDimensions(1440, 900, 1000);
+  assert.equal(same.width, 1440);
+  assert.equal(same.height, 900);
+  assert.equal(same.scale, 1);
+
+  const max16k = computeUpscaledDimensions(1440, 900, 20000);
+  assert.equal(max16k.width, MAX_EXPORT_LONG_EDGE);
+  assert.equal(max16k.height, 9600);
+  assert.equal(formatResolutionLabel(max16k.width, max16k.height), '15360×9600 (16K)');
+
+  const portrait16k = computeUpscaledDimensions(390, 844, 20000);
+  assert.ok(portrait16k.height <= MAX_EXPORT_LONG_EDGE);
+  assert.ok(portrait16k.width < portrait16k.height);
+});
+
+test('export tiling covers full target dimensions without gaps or overflow', () => {
+  const tiles = computeExportTiles(5000, 3000, 2048);
+  assert.equal(tiles.length, 6);
+  const coveredArea = tiles.reduce((sum, t) => sum + t.width * t.height, 0);
+  assert.equal(coveredArea, 5000 * 3000);
+  assert.deepEqual(tiles[tiles.length - 1], { x: 4096, y: 2048, width: 904, height: 952 });
+});
+
