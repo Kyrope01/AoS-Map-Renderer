@@ -87,17 +87,37 @@ export class VxlGrid implements VoxelGrid {
     return ((this.solidHi[colIdx] >>> (y - 32)) & 1) !== 0;
   }
 
-  getColor(x: number, y: number, z: number): number {
-    if (!this.isSolid(x, y, z)) return 0;
-    const colIdx = z * this.width + x;
+  /** Fast lookup when the caller already verified `(x, y, z)` is solid and knows `colIdx`. */
+  getColorAtSolid(colIdx: number, x: number, y: number, z: number): number {
     const start = this.colStart[colIdx];
-    const count = this.colCount[colIdx];
-    for (let i = 0; i < count; i++) {
-      if (this.surfGy[start + i] === y) {
-        return this.surfColor[start + i];
+    const end = start + this.colCount[colIdx];
+    const gyArr = this.surfGy;
+    for (let i = start; i < end; i++) {
+      if (gyArr[i] === y) {
+        return this.surfColor[i];
       }
     }
     return dirtColorAt(x, y, z);
+  }
+
+  getColor(x: number, y: number, z: number): number {
+    if (
+      x < 0 ||
+      x >= this.width ||
+      y < 0 ||
+      y >= this.height ||
+      z < 0 ||
+      z >= this.depth
+    ) {
+      return 0;
+    }
+    const colIdx = z * this.width + x;
+    const solid =
+      y < 32
+        ? ((this.solidLo[colIdx] >>> y) & 1) !== 0
+        : ((this.solidHi[colIdx] >>> (y - 32)) & 1) !== 0;
+    if (!solid) return 0;
+    return this.getColorAtSolid(colIdx, x, y, z);
   }
 }
 
@@ -116,6 +136,7 @@ export function parseVxl(
   options: VxlParseOptions = {},
 ): VxlGrid {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  const byteLen = bytes.byteLength;
   const width = options.width ?? AOS_VXL_WIDTH;
   const depth = options.depth ?? AOS_VXL_DEPTH;
   const height = options.height ?? AOS_VXL_HEIGHT;
@@ -125,9 +146,9 @@ export function parseVxl(
   }
 
   const totalColumns = width * depth;
-  if (bytes.byteLength < totalColumns * 4) {
+  if (byteLen < totalColumns * 4) {
     throw new VoxelParseError(
-      `File is too small to be a ${width}×${depth} .vxl map (expected at least ${totalColumns * 4} bytes, got ${bytes.byteLength}).`,
+      `File is too small to be a ${width}×${depth} .vxl map (expected at least ${totalColumns * 4} bytes, got ${byteLen}).`,
     );
   }
 
@@ -142,46 +163,39 @@ export function parseVxl(
   let surfColor = new Uint32Array(surfCap);
   let surfLen = 0;
 
-  const pushSurface = (gy: number, color: number) => {
-    if (surfLen >= surfCap) {
-      const nextCap = surfCap * 2;
-      const nextGy = new Uint8Array(nextCap);
-      const nextCol = new Uint32Array(nextCap);
-      nextGy.set(surfGy);
-      nextCol.set(surfColor);
-      surfGy = nextGy;
-      surfColor = nextCol;
-      surfCap = nextCap;
-    }
-    surfGy[surfLen] = gy;
-    surfColor[surfLen] = color;
-    surfLen++;
+  // Reusable scratch buffer for overhang bottom colors (avoids per-span array allocations)
+  const pendingBottomBuf = new Uint32Array(64);
+  let pendingBottomLen = 0;
+
+  const growSurface = () => {
+    const nextCap = surfCap * 2;
+    const nextGy = new Uint8Array(nextCap);
+    const nextCol = new Uint32Array(nextCap);
+    nextGy.set(surfGy);
+    nextCol.set(surfColor);
+    surfGy = nextGy;
+    surfColor = nextCol;
+    surfCap = nextCap;
   };
 
   let pos = 0;
   let voxelCount = 0;
-
-  const setSolidBit = (colIdx: number, aosZ: number) => {
-    const gy = height - 1 - aosZ;
-    if (gy < 32) {
-      solidLo[colIdx] |= 1 << gy;
-    } else {
-      solidHi[colIdx] |= 1 << (gy - 32);
-    }
-  };
+  const hMinus1 = height - 1;
 
   // Ace of Spades column order: outer y (depth / gz), inner x (width / gx)
   for (let gz = 0; gz < depth; gz++) {
+    const rowBase = gz * width;
     for (let gx = 0; gx < width; gx++) {
-      const colIdx = gz * width + gx;
+      const colIdx = rowBase + gx;
       colStart[colIdx] = surfLen;
 
-      // Track solid range starting from z=0 downward
       let airStart = 0;
-      let pendingBottomColors: number[] | null = null;
+      pendingBottomLen = 0;
+      let colLo = 0;
+      let colHi = 0;
 
       while (true) {
-        if (pos + 4 > bytes.byteLength) {
+        if (pos + 4 > byteLen) {
           throw new VoxelParseError(
             `Unexpected end of .vxl file at column (${gx}, ${gz}), byte ${pos}.`,
           );
@@ -194,27 +208,33 @@ export function parseVxl(
         pos += 4;
 
         // If previous span had bottom-facing surface colors, they end at spanAirStart - 1
-        if (pendingBottomColors !== null) {
-          const bLen = pendingBottomColors.length;
+        if (pendingBottomLen > 0) {
+          const bLen = pendingBottomLen;
           const bStart = spanAirStart - bLen;
           if (bStart < 0 || spanAirStart > height) {
             throw new VoxelParseError(
               `Corrupt .vxl bottom span geometry at column (${gx}, ${gz}).`,
             );
           }
-          // Fill solid interior between previous topEnd+1 and bStart-1
-          const solidEnd = Math.max(airStart, bStart);
+          const solidEnd = airStart > bStart ? airStart : bStart;
           for (let z = airStart; z < solidEnd; z++) {
-            setSolidBit(colIdx, z);
+            const gy = hMinus1 - z;
+            if (gy < 32) colLo |= 1 << gy;
+            else colHi |= 1 << (gy - 32);
             voxelCount++;
           }
           for (let i = 0; i < bLen; i++) {
             const z = bStart + i;
-            setSolidBit(colIdx, z);
-            pushSurface(height - 1 - z, pendingBottomColors[i]);
+            const gy = hMinus1 - z;
+            if (gy < 32) colLo |= 1 << gy;
+            else colHi |= 1 << (gy - 32);
+            if (surfLen >= surfCap) growSurface();
+            surfGy[surfLen] = gy;
+            surfColor[surfLen] = pendingBottomBuf[i];
+            surfLen++;
             voxelCount++;
           }
-          pendingBottomColors = null;
+          pendingBottomLen = 0;
         }
 
         // Real AoS .vxl files can emit topEnd = topStart - 1 (e.g. [44, 43]) for a 0-length top color run
@@ -238,7 +258,7 @@ export function parseVxl(
         }
 
         const colorBytesNeeded = lenTop * 4;
-        if (pos + colorBytesNeeded > bytes.byteLength) {
+        if (pos + colorBytesNeeded > byteLen) {
           throw new VoxelParseError(
             `Truncated .vxl top color data at column (${gx}, ${gz}).`,
           );
@@ -249,39 +269,49 @@ export function parseVxl(
           const g = bytes[pos + 1];
           const r = bytes[pos + 2];
           pos += 4;
-          setSolidBit(colIdx, z);
-          pushSurface(height - 1 - z, (0xff << 24) | (r << 16) | (g << 8) | b);
+          const gy = hMinus1 - z;
+          if (gy < 32) colLo |= 1 << gy;
+          else colHi |= 1 << (gy - 32);
+          if (surfLen >= surfCap) growSurface();
+          surfGy[surfLen] = gy;
+          surfColor[surfLen] = (0xff << 24) | (r << 16) | (g << 8) | b;
+          surfLen++;
           voxelCount++;
         }
 
         if (numChunks === 0) {
           // Final span: remaining voxels down to height - 1 are solid underground dirt
           for (let z = effectiveTopEnd + 1; z < height; z++) {
-            setSolidBit(colIdx, z);
+            const gy = hMinus1 - z;
+            if (gy < 32) colLo |= 1 << gy;
+            else colHi |= 1 << (gy - 32);
             voxelCount++;
           }
           break;
         }
 
         const lenBottom = numChunks - 1 - lenTop;
-        if (pos + lenBottom * 4 > bytes.byteLength) {
+        if (pos + lenBottom * 4 > byteLen) {
           throw new VoxelParseError(
             `Truncated .vxl bottom color data at column (${gx}, ${gz}).`,
           );
         }
 
         airStart = effectiveTopEnd + 1;
-        pendingBottomColors = new Array(lenBottom);
+        pendingBottomLen = lenBottom;
         for (let i = 0; i < lenBottom; i++) {
           const b = bytes[pos];
           const g = bytes[pos + 1];
           const r = bytes[pos + 2];
           pos += 4;
-          pendingBottomColors[i] = (0xff << 24) | (r << 16) | (g << 8) | b;
+          pendingBottomBuf[i] = (0xff << 24) | (r << 16) | (g << 8) | b;
         }
       }
 
-      colCount[colIdx] = Math.min(255, surfLen - colStart[colIdx]);
+      solidLo[colIdx] = colLo;
+      solidHi[colIdx] = colHi;
+      const count = surfLen - colStart[colIdx];
+      colCount[colIdx] = count > 255 ? 255 : count;
     }
   }
 
@@ -393,7 +423,6 @@ export function encodeVxl(
         const airStart = z;
         while (z < height && !isSolidAt(gx, z, gz)) z++;
         if (z >= height) {
-          // Should not happen if bottom bedrock is solid; emit fallback 1-voxel span at z=height-1
           out.push(0, height - 1, height - 1, airStart);
           out.push(DIRT_B, DIRT_G, DIRT_R, 0x7f);
           break;
@@ -402,11 +431,9 @@ export function encodeVxl(
         while (z < height && isExposed(gx, z, gz)) z++;
         const topEnd = z - 1;
 
-        // Advance through solid interior until next air
         while (z < height && isSolidAt(gx, z, gz)) z++;
 
         if (z === height) {
-          // Final span reaching bottom
           out.push(0, topStart, topEnd, airStart);
           for (let tz = topStart; tz <= topEnd; tz++) {
             pushColor(gx, tz, gz);
@@ -414,7 +441,6 @@ export function encodeVxl(
           break;
         }
 
-        // More air below -> find bottom-facing surface colors
         let botStart = z;
         while (botStart > topEnd + 1 && isExposed(gx, botStart - 1, gz)) {
           botStart--;

@@ -10,7 +10,6 @@ import { CameraMode, MeshStats } from '../voxel/types';
 
 interface TopBarProps {
   stats: MeshStats | null;
-  isLightStage: boolean;
   sidebarCollapsed: boolean;
   cameraMode: CameraMode;
   onOpenFile: () => void;
@@ -22,7 +21,6 @@ interface TopBarProps {
 
 export function TopBar({
   stats,
-  isLightStage,
   sidebarCollapsed,
   cameraMode,
   onOpenFile,
@@ -31,18 +29,13 @@ export function TopBar({
   onExportPng,
   onToggleSidebar,
 }: TopBarProps) {
-  const surfaceClass = isLightStage
-    ? 'bg-[#F7F4EE]/92 text-[#1B1A17] border-black/10'
-    : 'bg-[#14171D]/92 text-[#F3F1EC] border-white/10';
-
-  const btnHoverClass = isLightStage
-    ? 'hover:bg-black/6 text-[#1B1A17]'
-    : 'hover:bg-white/8 text-[#E8E6E0]';
+  const surfaceClass = 'bg-[#14171D]/92 text-[#F3F1EC] border-white/10';
+  const btnHoverClass = 'hover:bg-white/8 text-[#E8E6E0]';
 
   return (
     <header
       className={`pointer-events-none fixed top-3 left-3 z-20 flex items-center justify-end gap-2 transition-all duration-200 ${
-        sidebarCollapsed ? 'right-3' : 'right-3 sm:right-[316px]'
+        sidebarCollapsed ? 'right-3' : 'right-3 sm:right-[324px]'
       }`}
     >
       {/* Compact Action Strip */}

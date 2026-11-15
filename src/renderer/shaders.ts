@@ -1,5 +1,12 @@
 import * as THREE from 'three';
-import { BackdropPreset, FogMode, MatcapStyle, RenderSettings, ShaderMode } from '../voxel/types';
+import {
+  BackdropPreset,
+  FogMode,
+  MatcapStyle,
+  RenderSettings,
+  ShaderCategory,
+  ShaderMode,
+} from '../voxel/types';
 
 export interface BackdropTheme {
   id: BackdropPreset;
@@ -12,29 +19,11 @@ export interface BackdropTheme {
   skyHex: string;
   groundHex: string;
   defaultSunHex: string;
-  gridColor: string;
-  gridCenterColor: string;
   isLight: boolean;
   isSkyDome: boolean;
 }
 
 export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
-  overcast: {
-    id: 'overcast',
-    label: 'Nordic Sky',
-    bgHex: '#C5D3DF',
-    zenithHex: '#6E8EB0',
-    horizonHex: '#CEDAE4',
-    fogHex: '#CEDAE4',
-    fogDensity: 0.0028,
-    skyHex: '#DCE9F6',
-    groundHex: '#59636C',
-    defaultSunHex: '#FFF6E8',
-    gridColor: '#A9BAC8',
-    gridCenterColor: '#8EA2B4',
-    isLight: true,
-    isSkyDome: true,
-  },
   alpine: {
     id: 'alpine',
     label: 'Clear Alpine',
@@ -46,8 +35,20 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#E5F2FF',
     groundHex: '#556554',
     defaultSunHex: '#FFF7E2',
-    gridColor: '#7EA9CB',
-    gridCenterColor: '#6793B7',
+    isLight: true,
+    isSkyDome: true,
+  },
+  overcast: {
+    id: 'overcast',
+    label: 'Nordic Sky',
+    bgHex: '#C5D3DF',
+    zenithHex: '#6E8EB0',
+    horizonHex: '#CEDAE4',
+    fogHex: '#CEDAE4',
+    fogDensity: 0.0028,
+    skyHex: '#DCE9F6',
+    groundHex: '#59636C',
+    defaultSunHex: '#FFF6E8',
     isLight: true,
     isSkyDome: true,
   },
@@ -62,8 +63,6 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#FFD8B0',
     groundHex: '#5C4438',
     defaultSunHex: '#FFC684',
-    gridColor: '#B88D72',
-    gridCenterColor: '#98725A',
     isLight: false,
     isSkyDome: true,
   },
@@ -78,8 +77,6 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#E6A8A0',
     groundHex: '#3A2C34',
     defaultSunHex: '#FF9875',
-    gridColor: '#6A4C5B',
-    gridCenterColor: '#8B6274',
     isLight: false,
     isSkyDome: true,
   },
@@ -94,8 +91,6 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#7A9AC8',
     groundHex: '#10151E',
     defaultSunHex: '#BBD6FF',
-    gridColor: '#233248',
-    gridCenterColor: '#374D6C',
     isLight: false,
     isSkyDome: true,
   },
@@ -110,8 +105,6 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#DCE6F5',
     groundHex: '#2B2825',
     defaultSunHex: '#FFF6EB',
-    gridColor: '#272C36',
-    gridCenterColor: '#3E4656',
     isLight: false,
     isSkyDome: false,
   },
@@ -126,8 +119,6 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
     skyHex: '#FFFDF8',
     groundHex: '#8E8478',
     defaultSunHex: '#FFF9F0',
-    gridColor: '#D6CFC3',
-    gridCenterColor: '#B8AFA1',
     isLight: true,
     isSkyDome: false,
   },
@@ -135,35 +126,34 @@ export const BACKDROP_THEMES: Record<BackdropPreset, BackdropTheme> = {
 
 export interface ShaderPresetMeta {
   id: ShaderMode;
+  category: ShaderCategory;
   label: string;
   description: string;
 }
 
+export const SHADER_CATEGORIES: { id: ShaderCategory; label: string }[] = [
+  { id: 'cinematic', label: 'Map & Cinematic' },
+  { id: 'sculpt', label: 'Sculpt & Studio' },
+];
+
 export const SHADER_PRESETS: ShaderPresetMeta[] = [
-  { id: 'pbr', label: 'Studio PBR', description: 'Physical reflections, bevel seams & voxel AO' },
-  { id: 'atmospheric', label: 'Scenic GI', description: 'Soft sky bounce, aerial mist & sunlit terrain' },
-  { id: 'diorama', label: 'Diorama', description: 'Crisp miniature bounce & vibrant scale-model look' },
-  { id: 'cinema', label: 'Cinema Warm', description: 'Golden-teal filmic grade with deep contrast' },
-  { id: 'clay', label: 'Maquette Clay', description: 'Porcelain matte sculpt with warm bounce AO' },
-  { id: 'ao', label: 'AO Ambient', description: 'Pure ambient occlusion & curvature clay pass' },
-  { id: 'voxlap', label: 'Voxlap 2011', description: 'Classic Ace of Spades directional shading' },
-  { id: 'toon', label: 'Cel Ink', description: 'Quantized 3-band shading with silhouette ink' },
-  { id: 'rim', label: 'Chiaroscuro', description: 'Dramatic warm key light & cool Fresnel rim' },
-  { id: 'topographic', label: 'Topo Map', description: 'Cartographic elevation contours & hillshade' },
-  { id: 'cyber', label: 'Neon Grid', description: 'Twilight obsidian with glowing contour lines' },
-  { id: 'matcap', label: 'Studio MatCap', description: 'Spherical studio reflection capture' },
-  { id: 'blueprint', label: 'Blueprint', description: 'Technical drafting wireframe & edge grid' },
-  { id: 'hologram', label: 'Hologram', description: 'Animated volumetric scanwave & shimmer' },
+  { id: 'atmospheric', category: 'cinematic', label: 'Scenic GI', description: 'Soft sky bounce & aerial mist' },
+  { id: 'pbr', category: 'cinematic', label: 'Studio PBR', description: 'Physical reflections & AO' },
+  { id: 'cinema', category: 'cinematic', label: 'Cinema Warm', description: 'Golden sun & teal shadows' },
+  { id: 'diorama', category: 'cinematic', label: 'Diorama', description: 'Crisp miniature model bounce' },
+  { id: 'voxlap', category: 'cinematic', label: 'Voxlap 2011', description: 'Classic AoS face shading' },
+  { id: 'rim', category: 'cinematic', label: 'Chiaroscuro', description: 'Warm key light & cool rim' },
+
+  { id: 'ao', category: 'sculpt', label: 'AO Ambient', description: 'Pure ambient occlusion pass' },
+  { id: 'matcap', category: 'sculpt', label: 'Studio MatCap', description: 'Spherical studio reflections' },
 ];
 
 export interface SharedShaderUniforms {
   uTime: { value: number };
   uAoStrength: { value: number };
-  uBevelStrength: { value: number };
   uOutlineStrength: { value: number };
   uRoughness: { value: number };
   uMetalness: { value: number };
-  uClayTint: { value: THREE.Color };
   uMatcapIndex: { value: number };
   uModelRadius: { value: number };
   uModelHeight: { value: number };
@@ -192,11 +182,9 @@ export function createSharedUniforms(): SharedShaderUniforms {
   return {
     uTime: { value: 0 },
     uAoStrength: { value: 0.9 },
-    uBevelStrength: { value: 0.3 },
     uOutlineStrength: { value: 0.0 },
     uRoughness: { value: 0.55 },
     uMetalness: { value: 0.06 },
-    uClayTint: { value: new THREE.Color('#EAE4D8') },
     uMatcapIndex: { value: 0 },
     uModelRadius: { value: 120 },
     uModelHeight: { value: 64 },
@@ -244,11 +232,9 @@ export function syncSharedUniforms(
   scaledFogDensity: number,
 ): void {
   uniforms.uAoStrength.value = settings.aoStrength;
-  uniforms.uBevelStrength.value = settings.bevelStrength;
   uniforms.uOutlineStrength.value = settings.outlineStrength;
   uniforms.uRoughness.value = settings.roughness;
   uniforms.uMetalness.value = settings.metalness;
-  uniforms.uClayTint.value.set(settings.clayTint);
   uniforms.uMatcapIndex.value = MATCAP_INDEX[settings.matcapStyle];
   uniforms.uLightDir.value.copy(lightDir);
   uniforms.uLightColor.value.copy(lightColor);
@@ -379,7 +365,6 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
           vec3 sp = cameraPosition + rayDir * t;
 
           float hNorm = clamp((sp.y + 0.5) / cloudTop, 0.0, 1.0);
-          // Thick pooling base that feathers smoothly into billowing cloud tops
           float heightEnv = smoothstep(1.0, 0.16, hNorm);
 
           vec3 np = vec3(sp.x * freq + uTime * 0.07, sp.y * freq * 1.9, sp.z * freq - uTime * 0.045);
@@ -402,7 +387,6 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
 
     // 2. Active Distance Fog (In-Game AoS linear cutoff OR Atmospheric Exp2)
     if (uFogMode == 1) {
-      // Classic Ace of Spades / Voxlap in-game linear distance fog
       float fogStart = camOffset + uFogRange * 0.24;
       float fogEnd = max(fogStart + 20.0, camOffset + uFogRange * 1.55);
       float linFog = smoothstep(fogStart, fogEnd, depthDist) * clamp(uFogStrength, 0.0, 1.35);
@@ -653,7 +637,7 @@ export function createOceanMaterial(
 
 /**
  * Creates the Studio PBR material extended via onBeforeCompile to support
- * Voxel AO, screen-space bevel seams, explode displacement, slice clipping, and unified 3-mode fog.
+ * Voxel AO, section slicing, optional silhouette outlines, and unified fog.
  */
 export function createPbrVoxelMaterial(
   shared: SharedShaderUniforms,
@@ -670,7 +654,6 @@ export function createPbrVoxelMaterial(
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = shared.uTime;
     shader.uniforms.uAoStrength = shared.uAoStrength;
-    shader.uniforms.uBevelStrength = shared.uBevelStrength;
     shader.uniforms.uOutlineStrength = shared.uOutlineStrength;
     shader.uniforms.uModelRadius = shared.uModelRadius;
     shader.uniforms.uModelHeight = shared.uModelHeight;
@@ -695,10 +678,8 @@ export function createPbrVoxelMaterial(
         '#include <common>',
         `#include <common>
         attribute float aAo;
-        attribute vec2 aVoxelUv;
         uniform float uModelRadius;
         varying float vAo;
-        varying vec2 vVoxelUv;
         varying vec3 vVoxelLocalPos;
         varying vec3 vVoxelWorldPos;
         varying float vVoxelDepth;
@@ -708,7 +689,6 @@ export function createPbrVoxelMaterial(
         '#include <begin_vertex>',
         `#include <begin_vertex>
         vAo = aAo;
-        vVoxelUv = aVoxelUv;
         vCustomViewNormal = normalize(normalMatrix * normal);
         vVoxelLocalPos = transformed;
         vec4 customWp = modelMatrix * vec4(transformed, 1.0);
@@ -722,7 +702,6 @@ export function createPbrVoxelMaterial(
         `#include <common>
         uniform float uTime;
         uniform float uAoStrength;
-        uniform float uBevelStrength;
         uniform float uOutlineStrength;
         uniform int uSliceAxis;
         uniform float uSliceCoord;
@@ -742,7 +721,6 @@ export function createPbrVoxelMaterial(
         uniform float uVolumetricStrength;
         uniform float uCloudAltitude;
         varying float vAo;
-        varying vec2 vVoxelUv;
         varying vec3 vVoxelLocalPos;
         varying vec3 vVoxelWorldPos;
         varying float vVoxelDepth;
@@ -761,22 +739,11 @@ export function createPbrVoxelMaterial(
         `#include <color_fragment>
         float aoFactor = mix(1.0, clamp(vAo, 0.0, 1.0), uAoStrength);
         diffuseColor.rgb *= aoFactor;
-        if (uBevelStrength > 0.001) {
-          vec2 f = fract(vVoxelUv);
-          vec2 fw = max(fwidth(vVoxelUv), vec2(0.0001));
-          float mipFade = 1.0 - smoothstep(0.22, 0.62, max(fw.x, fw.y));
-          vec2 edge = smoothstep(vec2(0.0), fw * 1.4 + vec2(0.05), f) *
-                      smoothstep(vec2(0.0), fw * 1.4 + vec2(0.05), 1.0 - f);
-          float seam = (1.0 - min(edge.x, edge.y)) * mipFade;
-          float bevelShade = mix(1.0, 0.78, seam * uBevelStrength);
-          float hi = (smoothstep(0.16, 0.01, f.x) + smoothstep(0.99, 0.84, f.y)) * 0.045 * mipFade;
-          diffuseColor.rgb = diffuseColor.rgb * bevelShade + vec3(hi * uBevelStrength);
-        }
         if (uOutlineStrength > 0.001) {
           vec3 vDir = normalize(vViewPosition);
           float rim = 1.0 - abs(dot(normalize(vCustomViewNormal), vDir));
-          float ink = smoothstep(0.56, 0.82, rim);
-          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.02, 0.025, 0.035), ink * uOutlineStrength * 0.88);
+          float ink = smoothstep(0.66, 0.88, rim);
+          diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.02, 0.025, 0.035), ink * uOutlineStrength * 0.85);
         }`,
       )
       .replace(
@@ -785,17 +752,15 @@ export function createPbrVoxelMaterial(
       );
   };
 
-  mat.customProgramCacheKey = () => 'voxatelier-pbr-v4';
+  mat.customProgramCacheKey = () => 'voxatelier-pbr-v5';
   return mat;
 }
 
 const SHARED_VERTEX_SHADER = /* glsl */ `
   attribute float aAo;
-  attribute vec2 aVoxelUv;
 
   varying vec3 vColor;
   varying float vAo;
-  varying vec2 vVoxelUv;
   varying vec3 vWorldNormal;
   varying vec3 vViewNormal;
   varying vec3 vViewPos;
@@ -806,7 +771,6 @@ const SHARED_VERTEX_SHADER = /* glsl */ `
   void main() {
     vColor = color;
     vAo = aAo;
-    vVoxelUv = aVoxelUv;
     vLocalPos = position;
 
     vec4 worldPosition = modelMatrix * vec4(position, 1.0);
@@ -825,11 +789,9 @@ const SHARED_VERTEX_SHADER = /* glsl */ `
 const FRAGMENT_PREAMBLE = /* glsl */ `
   uniform float uTime;
   uniform float uAoStrength;
-  uniform float uBevelStrength;
   uniform float uOutlineStrength;
   uniform float uRoughness;
   uniform float uMetalness;
-  uniform vec3 uClayTint;
   uniform int uMatcapIndex;
   uniform int uSliceAxis;
   uniform float uSliceCoord;
@@ -854,7 +816,6 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
 
   varying vec3 vColor;
   varying float vAo;
-  varying vec2 vVoxelUv;
   varying vec3 vWorldNormal;
   varying vec3 vViewNormal;
   varying vec3 vViewPos;
@@ -866,16 +827,6 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
     if (uSliceAxis == 1 && vLocalPos.x > uSliceCoord) discard;
     if (uSliceAxis == 2 && vLocalPos.y > uSliceCoord) discard;
     if (uSliceAxis == 3 && vLocalPos.z > uSliceCoord) discard;
-  }
-
-  float computeVoxelSeam(out float bevelHi) {
-    vec2 f = fract(vVoxelUv);
-    vec2 fw = max(fwidth(vVoxelUv), vec2(0.0001));
-    float mipFade = 1.0 - smoothstep(0.22, 0.62, max(fw.x, fw.y));
-    vec2 edge = smoothstep(vec2(0.0), fw * 1.4 + vec2(0.05), f) *
-                smoothstep(vec2(0.0), fw * 1.4 + vec2(0.05), 1.0 - f);
-    bevelHi = (smoothstep(0.16, 0.01, f.x) + smoothstep(0.99, 0.84, f.y)) * 0.05 * mipFade;
-    return (1.0 - min(edge.x, edge.y)) * mipFade;
   }
 
   ${FOG_AND_VOLUMETRIC_GLSL}
@@ -902,8 +853,6 @@ function makeStylizedShader(
         vec3 VV = normalize(vViewPos);
 
         float ao = mix(1.0, vAo, clamp(uAoStrength * 1.1, 0.0, 1.5));
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
         float ndl = max(0.0, dot(N, L));
         float wrap = max(0.0, (dot(N, L) + 0.18) / 1.18);
@@ -919,11 +868,9 @@ function makeStylizedShader(
         float fresnel = pow(1.0 - max(0.0, dot(VN, VV)), 3.5) * 0.16;
         col += uLightColor * spec + mix(uHorizonColor, uSkyColor, 0.5) * fresnel * ao;
 
-        col = col * mix(1.0, 0.82, seam * uBevelStrength) + vec3(bevelHi * uBevelStrength);
-
         if (uOutlineStrength > 0.001) {
           float rim = 1.0 - abs(dot(VN, VV));
-          col = mix(col, vec3(0.04, 0.05, 0.07), smoothstep(0.58, 0.84, rim) * uOutlineStrength * 0.82);
+          col = mix(col, vec3(0.04, 0.05, 0.07), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.82);
         }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
@@ -941,10 +888,7 @@ function makeStylizedShader(
         vec3 VV = normalize(vViewPos);
 
         float ao = pow(mix(1.0, vAo, clamp(uAoStrength * 1.15, 0.0, 1.5)), 1.15);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
-        // Boost vibrance slightly for crisp scale-model look
         float lum = dot(vColor, vec3(0.299, 0.587, 0.114));
         vec3 vibrant = mix(vec3(lum), vColor, 1.18);
 
@@ -954,12 +898,10 @@ function makeStylizedShader(
         vec3 coolFill = mix(vec3(0.32, 0.40, 0.54), uSkyColor * 0.55, 0.6) * (0.45 + 0.55 * fill);
 
         vec3 col = vibrant * (key + coolFill) * ao;
-        // Crisp toy-like bevel catchlight
-        col = col * mix(1.0, 0.78, seam * max(0.35, uBevelStrength)) + vec3(bevelHi * max(0.35, uBevelStrength) * 1.4);
 
         if (uOutlineStrength > 0.001) {
           float rim = 1.0 - abs(dot(VN, VV));
-          col = mix(col, vec3(0.03), smoothstep(0.58, 0.82, rim) * uOutlineStrength * 0.8);
+          col = mix(col, vec3(0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
@@ -978,11 +920,8 @@ function makeStylizedShader(
         vec3 VV = normalize(vViewPos);
 
         float ao = mix(1.0, vAo, clamp(uAoStrength * 1.2, 0.0, 1.5));
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
         float ndl = max(0.0, dot(N, L));
-        // Golden-teal cinematic split lighting
         vec3 warmSun = mix(uLightColor, vec3(1.0, 0.74, 0.44), 0.42) * ndl * uLightIntensity * 1.12;
         vec3 tealShadow = vec3(0.09, 0.17, 0.23) * (1.0 - ndl * 0.4);
 
@@ -993,78 +932,10 @@ function makeStylizedShader(
         float rim = pow(1.0 - max(0.0, dot(VN, VV)), 3.0);
         col += warmSun * spec * 0.6 + mix(vec3(0.22, 0.55, 0.68), uLightColor, ndl) * rim * 0.25;
 
-        col = col * mix(1.0, 0.80, seam * uBevelStrength) + vec3(bevelHi * uBevelStrength);
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'topographic') {
-    body = /* glsl */ `
-      vec3 hypsometricRamp(float hNorm) {
-        vec3 c0 = vec3(0.07, 0.32, 0.48); // Sea / low basin
-        vec3 c1 = vec3(0.18, 0.54, 0.38); // Valley green
-        vec3 c2 = vec3(0.68, 0.66, 0.34); // Ridge ochre
-        vec3 c3 = vec3(0.76, 0.44, 0.28); // Highland terracotta
-        vec3 c4 = vec3(0.93, 0.92, 0.90); // Peak snow
-        if (hNorm < 0.22) return mix(c0, c1, hNorm / 0.22);
-        if (hNorm < 0.50) return mix(c1, c2, (hNorm - 0.22) / 0.28);
-        if (hNorm < 0.78) return mix(c2, c3, (hNorm - 0.50) / 0.28);
-        return mix(c3, c4, clamp((hNorm - 0.78) / 0.22, 0.0, 1.0));
-      }
-
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-
-        float ao = mix(1.0, vAo, uAoStrength * 0.9);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-
-        float hNorm = clamp(vWorldPos.y / max(16.0, uModelHeight), 0.0, 1.0);
-        vec3 topoCol = mix(hypsometricRamp(hNorm), vColor, 0.22);
-
-        // Crisp topographic contour rings every 2 voxels in altitude
-        float contourPhase = fract(vWorldPos.y * 0.5);
-        float contour = 1.0 - smoothstep(0.0, 0.09, min(contourPhase, 1.0 - contourPhase));
-
-        float hillshade = (0.45 + 0.65 * max(0.0, dot(N, L))) * uLightIntensity * 0.85;
-        vec3 col = topoCol * hillshade * ao;
-        col = mix(col, vec3(0.06, 0.09, 0.11), contour * 0.55);
-        col *= mix(1.0, 0.86, seam * uBevelStrength);
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'cyber') {
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float ao = mix(1.0, vAo, uAoStrength);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-
-        float rim = pow(1.0 - abs(dot(VN, V)), 2.2);
-        float ndl = max(0.0, dot(N, L));
-
-        float contourPhase = fract(vWorldPos.y * 0.25);
-        float contour = 1.0 - smoothstep(0.0, 0.08, min(contourPhase, 1.0 - contourPhase));
-
-        vec3 baseDark = mix(vec3(0.03, 0.04, 0.09), vColor * 0.25, 0.45) * (0.45 + ndl * 0.65) * ao;
-        vec3 neonCyan = vec3(0.10, 0.86, 1.0);
-        vec3 neonMag = vec3(1.0, 0.22, 0.68);
-        vec3 gridHue = mix(neonCyan, neonMag, clamp(vWorldPos.y / max(16.0, uModelHeight), 0.0, 1.0));
-
-        vec3 col = baseDark + gridHue * (seam * max(0.35, uBevelStrength) * 0.55 + rim * 0.85 + contour * 0.72);
+        if (uOutlineStrength > 0.001) {
+          float sil = 1.0 - abs(dot(VN, VV));
+          col = mix(col, vec3(0.02, 0.03, 0.04), smoothstep(0.66, 0.88, sil) * uOutlineStrength * 0.8);
+        }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
         #include <tonemapping_fragment>
@@ -1081,93 +952,15 @@ function makeStylizedShader(
         vec3 V = normalize(vViewPos);
 
         float ao = pow(mix(1.0, vAo, clamp(uAoStrength * 1.25, 0.0, 1.5)), 1.25);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
         float hemi = dot(N, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
         float sun = max(0.0, dot(N, L)) * 0.35 + 0.65;
         vec3 col = mix(vec3(0.58, 0.60, 0.64), vec3(0.96, 0.95, 0.93), hemi) * sun * ao;
-        col *= mix(1.0, 0.78, seam * uBevelStrength);
-        col += vec3(bevelHi * uBevelStrength * 0.8);
 
         if (uOutlineStrength > 0.001) {
           float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.08), smoothstep(0.58, 0.84, rim) * uOutlineStrength * 0.85);
+          col = mix(col, vec3(0.08), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.85);
         }
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'clay') {
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 V = normalize(vViewPos);
-        vec3 VN = normalize(vViewNormal);
-
-        float ao = mix(1.0, vAo, clamp(uAoStrength * 1.2, 0.0, 1.5));
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-
-        float wrap = max(0.0, (dot(N, L) + 0.30) / 1.30);
-        float hemi = dot(N, vec3(0.0, 1.0, 0.0)) * 0.5 + 0.5;
-        vec3 bounce = mix(uGroundColor * 0.42 + vec3(0.10), uSkyColor * 0.42 + vec3(0.20), hemi);
-
-        vec3 clayBase = mix(uClayTint, vColor * 0.85 + vec3(0.15), 0.18);
-        vec3 col = clayBase * (bounce * 0.50 + uLightColor * wrap * uLightIntensity * 0.78);
-
-        vec3 H = normalize(L + normalize(cameraPosition - vWorldPos));
-        float spec = pow(max(0.0, dot(N, H)), mix(64.0, 8.0, uRoughness)) * (1.0 - uRoughness) * 0.35;
-        col += uLightColor * spec;
-
-        col *= ao;
-        col = col * mix(1.0, 0.84, seam * uBevelStrength) + vec3(bevelHi * uBevelStrength);
-
-        if (uOutlineStrength > 0.001) {
-          float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.05, 0.05, 0.06), smoothstep(0.58, 0.84, rim) * uOutlineStrength * 0.85);
-        }
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'toon') {
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float ao = mix(1.0, vAo, uAoStrength);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-
-        float ndl = dot(N, L) * 0.5 + 0.5;
-        float band1 = smoothstep(0.32, 0.36, ndl);
-        float band2 = smoothstep(0.68, 0.72, ndl);
-        float shade = 0.34 + band1 * 0.33 + band2 * 0.38;
-
-        vec3 H = normalize(L + normalize(cameraPosition - vWorldPos));
-        float spec = smoothstep(0.92, 0.94, dot(N, H)) * (1.0 - uRoughness) * 0.5;
-
-        vec3 shadowTint = mix(vec3(0.28, 0.32, 0.44), uGroundColor + vec3(0.25), 0.35);
-        vec3 litColor = vColor * uLightColor * uLightIntensity * 0.85;
-        vec3 col = mix(vColor * shadowTint, litColor, shade) * ao + vec3(spec);
-
-        col *= mix(1.0, 0.65, seam * uBevelStrength);
-
-        float inkWeight = max(0.45, uOutlineStrength);
-        float rim = 1.0 - abs(dot(VN, V));
-        float outline = smoothstep(0.54, 0.66, rim);
-        col = mix(col, vec3(0.03, 0.03, 0.045), outline * inkWeight);
 
         gl_FragColor = vec4(applyFog(col), 1.0);
         #include <tonemapping_fragment>
@@ -1181,8 +974,6 @@ function makeStylizedShader(
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
         float ao = mix(1.0, vAo, uAoStrength * 0.9);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
         float faceShade = 1.0;
         if (N.y > 0.5) faceShade = 1.0;
@@ -1194,13 +985,11 @@ function makeStylizedShader(
         float combined = mix(faceShade, 0.52 + sun * 0.68, 0.38) * uLightIntensity * 0.82;
         vec3 col = vColor * mix(vec3(1.0), uLightColor, 0.55) * combined * ao;
 
-        col *= mix(1.0, 0.86, seam * uBevelStrength);
-
         if (uOutlineStrength > 0.001) {
           vec3 VN = normalize(vViewNormal);
           vec3 V = normalize(vViewPos);
           float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.02, 0.02, 0.03), smoothstep(0.6, 0.85, rim) * uOutlineStrength * 0.8);
+          col = mix(col, vec3(0.02, 0.02, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
@@ -1241,19 +1030,16 @@ function makeStylizedShader(
         applySliceClip();
         vec3 VN = normalize(vViewNormal);
         vec3 V = normalize(vViewPos);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
         vec2 mUv = clamp(VN.xy * 0.48 + 0.5, 0.02, 0.98);
         vec3 mc = evalMatcap(mUv, uMatcapIndex);
 
         float ao = mix(1.0, vAo, uAoStrength);
         vec3 tinted = mix(mc, mc * (vColor * 1.35 + vec3(0.15)), 1.0 - uMetalness * 0.75);
         vec3 col = tinted * ao * (0.7 + uLightIntensity * 0.28);
-        col = col * mix(1.0, 0.80, seam * uBevelStrength) + vec3(bevelHi * uBevelStrength * 1.5);
 
         if (uOutlineStrength > 0.001) {
           float rim = 1.0 - abs(dot(VN, V));
-          col = mix(col, vec3(0.02, 0.025, 0.03), smoothstep(0.58, 0.84, rim) * uOutlineStrength * 0.85);
+          col = mix(col, vec3(0.02, 0.025, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.85);
         }
 
         gl_FragColor = vec4(applyFog(col), 1.0);
@@ -1261,7 +1047,8 @@ function makeStylizedShader(
         #include <colorspace_fragment>
       }
     `;
-  } else if (mode === 'rim') {
+  } else {
+    // rim
     body = /* glsl */ `
       void main() {
         applySliceClip();
@@ -1271,8 +1058,6 @@ function makeStylizedShader(
         vec3 V = normalize(vViewPos);
 
         float ao = mix(1.0, vAo, uAoStrength * 1.15);
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
 
         float ndl = max(0.0, dot(N, L));
         vec3 warmKey = uLightColor * ndl * uLightIntensity;
@@ -1282,63 +1067,6 @@ function makeStylizedShader(
         vec3 rimColor = mix(vec3(0.28, 0.68, 1.0), uLightColor, step(0.0, dot(N, L)));
 
         vec3 col = vColor * (warmKey + coolShadow) * ao + rimColor * fresnel * 0.85;
-        col = col * mix(1.0, 0.76, seam * uBevelStrength) + vec3(bevelHi * uBevelStrength);
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else if (mode === 'blueprint') {
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-        float rim = pow(1.0 - abs(dot(VN, V)), 2.0);
-        float ndl = max(0.0, dot(N, L)) * 0.55 + 0.45;
-        float ao = mix(1.0, vAo, uAoStrength * 0.8);
-
-        vec3 paperBlue = vec3(0.05, 0.14, 0.28);
-        vec3 inkCyan = mix(vec3(0.38, 0.82, 1.0), uClayTint, 0.25);
-
-        float gridStrength = max(0.35, uBevelStrength);
-        vec3 base = mix(paperBlue, vColor * 0.22 + paperBlue * 0.8, 0.35) * ndl * ao;
-        vec3 col = mix(base, inkCyan, clamp(seam * gridStrength * 0.9 + rim * 0.65, 0.0, 1.0));
-
-        gl_FragColor = vec4(applyFog(col), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
-  } else {
-    // hologram
-    body = /* glsl */ `
-      void main() {
-        applySliceClip();
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float bevelHi = 0.0;
-        float seam = computeVoxelSeam(bevelHi);
-        float fresnel = pow(1.0 - abs(dot(VN, V)), 1.8);
-
-        float scan = sin(vLocalPos.y * 6.5 - uTime * 3.6) * 0.5 + 0.5;
-        float fineLines = sin(vLocalPos.y * 28.0 + uTime * 8.0) * 0.5 + 0.5;
-        float pulse = smoothstep(0.65, 1.0, scan) * 0.65;
-
-        float lum = dot(vColor, vec3(0.299, 0.587, 0.114));
-        vec3 holoHue = mix(vec3(0.10, 0.78, 0.96), vec3(0.95, 0.45, 0.24), pulse * 0.35);
-        vec3 tinted = mix(holoHue, vColor * 1.4, 0.28);
-
-        float ao = mix(1.0, vAo, uAoStrength * 0.7);
-        vec3 col = tinted * (0.28 + lum * 0.45 + fineLines * 0.18 + pulse * 0.45) * ao;
-        col += holoHue * (fresnel * 1.15 + seam * max(0.25, uBevelStrength) * 0.55);
 
         gl_FragColor = vec4(applyFog(col), 1.0);
         #include <tonemapping_fragment>
@@ -1361,16 +1089,10 @@ export interface MaterialBank {
   atmospheric: THREE.ShaderMaterial;
   diorama: THREE.ShaderMaterial;
   cinema: THREE.ShaderMaterial;
-  clay: THREE.ShaderMaterial;
   ao: THREE.ShaderMaterial;
   voxlap: THREE.ShaderMaterial;
-  toon: THREE.ShaderMaterial;
   rim: THREE.ShaderMaterial;
-  topographic: THREE.ShaderMaterial;
-  cyber: THREE.ShaderMaterial;
   matcap: THREE.ShaderMaterial;
-  blueprint: THREE.ShaderMaterial;
-  hologram: THREE.ShaderMaterial;
   dispose: () => void;
 }
 
@@ -1379,47 +1101,29 @@ export function createMaterialBank(shared: SharedShaderUniforms): MaterialBank {
   const atmospheric = makeStylizedShader('atmospheric', shared);
   const diorama = makeStylizedShader('diorama', shared);
   const cinema = makeStylizedShader('cinema', shared);
-  const clay = makeStylizedShader('clay', shared);
   const ao = makeStylizedShader('ao', shared);
   const voxlap = makeStylizedShader('voxlap', shared);
-  const toon = makeStylizedShader('toon', shared);
   const rim = makeStylizedShader('rim', shared);
-  const topographic = makeStylizedShader('topographic', shared);
-  const cyber = makeStylizedShader('cyber', shared);
   const matcap = makeStylizedShader('matcap', shared);
-  const blueprint = makeStylizedShader('blueprint', shared);
-  const hologram = makeStylizedShader('hologram', shared);
 
   return {
     pbr,
     atmospheric,
     diorama,
     cinema,
-    clay,
     ao,
     voxlap,
-    toon,
     rim,
-    topographic,
-    cyber,
     matcap,
-    blueprint,
-    hologram,
     dispose: () => {
       pbr.dispose();
       atmospheric.dispose();
       diorama.dispose();
       cinema.dispose();
-      clay.dispose();
       ao.dispose();
       voxlap.dispose();
-      toon.dispose();
       rim.dispose();
-      topographic.dispose();
-      cyber.dispose();
       matcap.dispose();
-      blueprint.dispose();
-      hologram.dispose();
     },
   };
 }

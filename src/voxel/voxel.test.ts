@@ -132,8 +132,9 @@ test('greedy mesher merges uniform faces and computes valid attributes', () => {
   assert.equal(built.quadCount, 6);
   assert.equal(built.triangleCount, 12);
   assert.ok(built.geometry.getAttribute('aAo'));
-  assert.ok(built.geometry.getAttribute('aVoxelUv'));
-  assert.ok(built.geometry.getAttribute('aExplodeDir'));
+  assert.ok(built.geometry.getAttribute('position'));
+  assert.ok(built.geometry.getAttribute('normal'));
+  assert.ok(built.geometry.getAttribute('color'));
   built.geometry.dispose();
 });
 

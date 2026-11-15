@@ -1,13 +1,13 @@
 import {
+  Camera,
   CloudSun,
-  Rotate3d,
   SlidersHorizontal,
   Sparkles,
   Waves,
   X,
 } from 'lucide-react';
 import { useState } from 'react';
-import { BACKDROP_THEMES, SHADER_PRESETS } from '../renderer/shaders';
+import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/shaders';
 import {
   BackdropPreset,
   CameraPreset,
@@ -18,25 +18,17 @@ import {
   SliceAxis,
 } from '../voxel/types';
 
-type SidebarTab = 'shaders' | 'surface' | 'atmosphere' | 'stage';
+type SidebarTab = 'shaders' | 'material' | 'atmosphere' | 'camera';
 
 interface ControlSidebarProps {
   settings: RenderSettings;
   stats: MeshStats | null;
-  isLightStage: boolean;
   collapsed: boolean;
   onToggleCollapse: () => void;
   onUpdateSettings: (patch: Partial<RenderSettings>) => void;
   onSelectCamera: (preset: CameraPreset) => void;
   onResetDefaults: () => void;
 }
-
-const CLAY_TINTS = [
-  { label: 'Chalk', hex: '#EAE4D8' },
-  { label: 'Terracotta', hex: '#D47B5A' },
-  { label: 'Celadon', hex: '#8EB3A3' },
-  { label: 'Slate', hex: '#8894A4' },
-];
 
 const MATCAP_STYLES: { id: MatcapStyle; label: string }[] = [
   { id: 'chrome', label: 'Chrome' },
@@ -74,7 +66,6 @@ interface SliderControlProps {
   max: number;
   step: number;
   displayValue: string;
-  isLight: boolean;
   onChange: (val: number) => void;
 }
 
@@ -86,26 +77,21 @@ function SliderControl({
   max,
   step,
   displayValue,
-  isLight,
   onChange,
 }: SliderControlProps) {
   const pct = ((value - min) / (max - min)) * 100;
-  const trackBg = isLight
-    ? `linear-gradient(to right, #E05A2B ${pct}%, rgba(0,0,0,0.14) ${pct}%)`
-    : `linear-gradient(to right, #E05A2B ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
+  const trackBg = `linear-gradient(to right, #E05A2B ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
 
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between gap-2 text-[11px]">
         <label
           htmlFor={id}
-          className={`font-medium whitespace-nowrap ${isLight ? 'text-[#4B4741]' : 'text-[#B8C0CC]'}`}
+          className="font-medium whitespace-nowrap text-[#B8C0CC]"
         >
           {label}
         </label>
-        <span
-          className={`font-mono-tabular ${isLight ? 'text-[#6E685F]' : 'text-[#8992A2]'}`}
-        >
+        <span className="font-mono-tabular text-[#8992A2]">
           {displayValue}
         </span>
       </div>
@@ -127,7 +113,6 @@ function SliderControl({
 export function ControlSidebar({
   settings,
   stats,
-  isLightStage,
   collapsed,
   onToggleCollapse,
   onUpdateSettings,
@@ -136,53 +121,56 @@ export function ControlSidebar({
 }: ControlSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>('shaders');
 
-  const panelSurface = isLightStage
-    ? 'bg-[#F7F4EE]/94 text-[#1B1A17] border-black/10'
-    : 'bg-[#14171D]/94 text-[#F3F1EC] border-white/10';
-
-  const dividerClass = isLightStage ? 'border-black/8' : 'border-white/8';
-  const subBarBg = isLightStage ? 'bg-black/5' : 'bg-white/5';
-  const mutedText = isLightStage ? 'text-[#666159]' : 'text-[#8F98A6]';
-  const inactiveBtn = isLightStage
-    ? 'text-[#4B4741] hover:text-[#1B1A17] hover:bg-black/6 border-black/10'
-    : 'text-[#A6AEBC] hover:text-[#F3F1EC] hover:bg-white/7 border-white/10';
+  const panelSurface = 'bg-[#14171D]/94 text-[#F3F1EC] border-white/10';
+  const dividerClass = 'border-white/8';
+  const subBarBg = 'bg-white/5';
+  const mutedText = 'text-[#8F98A6]';
+  const sectionLabel = `block text-[10px] font-semibold uppercase tracking-wider ${mutedText}`;
+  const inactiveBtn =
+    'text-[#A6AEBC] hover:text-[#F3F1EC] hover:bg-white/7 border-white/10';
 
   const activeBtn = 'bg-[#E05A2B] text-white border-[#E05A2B]';
 
   const tabs: { id: SidebarTab; label: string; icon: typeof Sparkles }[] = [
     { id: 'shaders', label: 'Shaders', icon: Sparkles },
-    { id: 'surface', label: 'Surface', icon: SlidersHorizontal },
+    { id: 'material', label: 'Material', icon: SlidersHorizontal },
     { id: 'atmosphere', label: 'Sky & Fog', icon: CloudSun },
-    { id: 'stage', label: 'Stage', icon: Rotate3d },
+    { id: 'camera', label: 'Camera', icon: Camera },
   ];
 
   return (
     <aside
       aria-label="Render Studio Sidebar"
       aria-hidden={collapsed}
-      className={`fixed top-3 right-3 bottom-3 z-20 w-[min(296px,calc(100vw-24px))] flex flex-col rounded-lg border shadow-xl transition-transform duration-200 ease-out ${panelSurface} ${
+      className={`fixed top-3 right-3 bottom-3 z-20 w-[min(304px,calc(100vw-24px))] flex flex-col rounded-lg border shadow-xl transition-transform duration-200 ease-out ${panelSurface} ${
         collapsed ? 'translate-x-[calc(100%+20px)] pointer-events-none' : 'translate-x-0'
       }`}
     >
       {/* Sidebar Header */}
-      <div className={`flex items-center justify-between px-3.5 py-2.5 border-b ${dividerClass}`}>
-        <div className="flex items-center gap-2 min-w-0">
-          <span className="text-xs font-semibold tracking-tight">Studio</span>
-          {stats && (
-            <span className={`font-mono-tabular text-[11px] truncate ${mutedText}`}>
-              {stats.triangleCount.toLocaleString()} tris
+      <div className={`flex items-center justify-between gap-2 px-3.5 py-2.5 border-b ${dividerClass}`}>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-xs font-semibold tracking-tight truncate">
+              {stats ? stats.name : 'Studio'}
             </span>
+            {stats && (
+              <span className={`font-mono-tabular text-[10px] uppercase shrink-0 ${mutedText}`}>
+                .{stats.format}
+              </span>
+            )}
+          </div>
+          {stats && (
+            <div className={`font-mono-tabular text-[10px] truncate ${mutedText}`}>
+              {stats.triangleCount.toLocaleString()} tris · {stats.width}×{stats.height}×{stats.depth}
+            </div>
           )}
         </div>
-        <div className="flex items-center gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
             onClick={onResetDefaults}
-            className={`text-[11px] font-medium px-2 py-1 rounded transition-colors cursor-pointer ${
-              isLightStage
-                ? 'text-[#666159] hover:text-[#1B1A17] hover:bg-black/6'
-                : 'text-[#8F98A6] hover:text-white hover:bg-white/7'
-            }`}
+            className="text-[11px] font-medium px-2 py-1 rounded transition-colors cursor-pointer text-[#8F98A6] hover:text-white hover:bg-white/7"
+            title="Reset all render settings to defaults"
           >
             Reset
           </button>
@@ -191,18 +179,14 @@ export function ControlSidebar({
             onClick={onToggleCollapse}
             aria-label="Close Sidebar"
             title="Hide sidebar (H)"
-            className={`p-1 rounded transition-colors cursor-pointer ${
-              isLightStage
-                ? 'text-[#666159] hover:text-[#1B1A17] hover:bg-black/6'
-                : 'text-[#8F98A6] hover:text-white hover:bg-white/7'
-            }`}
+            className="p-1 rounded transition-colors cursor-pointer text-[#8F98A6] hover:text-white hover:bg-white/7"
           >
             <X className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
         </div>
       </div>
 
-      {/* Vertical Sidebar Tab Switcher */}
+      {/* Tab Switcher */}
       <div className={`grid grid-cols-4 gap-1 p-1.5 border-b ${dividerClass}`} role="tablist">
         {tabs.map((tab) => {
           const Icon = tab.icon;
@@ -217,9 +201,7 @@ export function ControlSidebar({
               className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-md text-[10px] font-medium transition-colors cursor-pointer ${
                 isSelected
                   ? 'bg-[#E05A2B] text-white'
-                  : isLightStage
-                    ? 'text-[#5A554E] hover:text-[#1B1A17] hover:bg-black/6'
-                    : 'text-[#9CA4B3] hover:text-[#F3F1EC] hover:bg-white/7'
+                  : 'text-[#9CA4B3] hover:text-[#F3F1EC] hover:bg-white/7'
               }`}
             >
               <Icon className="w-3.5 h-3.5" aria-hidden="true" />
@@ -232,150 +214,118 @@ export function ControlSidebar({
       {/* Scrollable Tab Body */}
       <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-4">
         {activeTab === 'shaders' && (
-          <>
-            <div className="grid grid-cols-2 gap-1.5">
-              {SHADER_PRESETS.map((preset) => {
-                const active = settings.shaderMode === preset.id;
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => onUpdateSettings({ shaderMode: preset.id })}
-                    title={preset.description}
-                    className={`flex flex-col items-start px-2.5 py-2 rounded-md border text-left transition-colors cursor-pointer ${
-                      active ? activeBtn : inactiveBtn
-                    }`}
-                  >
-                    <span className="text-[11px] font-semibold leading-tight">
-                      {preset.label}
-                    </span>
-                    <span
-                      className={`text-[10px] leading-tight line-clamp-1 mt-0.5 ${
-                        active ? 'text-white/80' : mutedText
-                      }`}
-                    >
-                      {preset.description}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+          <div className="space-y-4">
+            {SHADER_CATEGORIES.map((category, idx) => {
+              const presets = SHADER_PRESETS.filter((p) => p.category === category.id);
+              return (
+                <div
+                  key={category.id}
+                  className={idx > 0 ? `pt-3 border-t space-y-2 ${dividerClass}` : 'space-y-2'}
+                >
+                  <span className={sectionLabel}>{category.label}</span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {presets.map((preset) => {
+                      const active = settings.shaderMode === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => onUpdateSettings({ shaderMode: preset.id })}
+                          className={`flex flex-col items-start px-2.5 py-2 rounded-md border text-left transition-colors cursor-pointer ${
+                            active ? activeBtn : inactiveBtn
+                          }`}
+                        >
+                          <span className="text-[11px] font-semibold leading-tight">
+                            {preset.label}
+                          </span>
+                          <span
+                            className={`text-[10px] leading-snug mt-0.5 ${
+                              active ? 'text-white/85' : mutedText
+                            }`}
+                          >
+                            {preset.description}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-            {settings.shaderMode === 'clay' && (
-              <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-                <span className={`block text-[11px] font-medium ${mutedText}`}>
-                  Clay Pigment
-                </span>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {CLAY_TINTS.map((t) => {
-                    const selected = settings.clayTint.toLowerCase() === t.hex.toLowerCase();
-                    return (
-                      <button
-                        key={t.hex}
-                        type="button"
-                        onClick={() => onUpdateSettings({ clayTint: t.hex })}
-                        className={`flex items-center gap-1.5 px-2 py-1.5 rounded border text-[11px] transition-colors cursor-pointer ${
-                          selected ? activeBtn : inactiveBtn
-                        }`}
-                      >
-                        <span
-                          className="w-3 h-3 rounded-sm border border-black/20 shrink-0"
-                          style={{ backgroundColor: t.hex }}
-                          aria-hidden="true"
-                        />
-                        <span>{t.label}</span>
-                      </button>
-                    );
-                  })}
+                  {category.id === 'sculpt' && settings.shaderMode === 'matcap' && (
+                    <div className={`pt-2 space-y-1.5`}>
+                      <span className={`block text-[11px] font-medium ${mutedText}`}>
+                        MatCap Finish
+                      </span>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {MATCAP_STYLES.map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => onUpdateSettings({ matcapStyle: m.id })}
+                            className={`px-2 py-1.5 rounded border text-[11px] font-medium transition-colors cursor-pointer ${
+                              settings.matcapStyle === m.id ? activeBtn : inactiveBtn
+                            }`}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              </div>
-            )}
-
-            {settings.shaderMode === 'matcap' && (
-              <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-                <span className={`block text-[11px] font-medium ${mutedText}`}>
-                  MatCap Finish
-                </span>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {MATCAP_STYLES.map((m) => (
-                    <button
-                      key={m.id}
-                      type="button"
-                      onClick={() => onUpdateSettings({ matcapStyle: m.id })}
-                      className={`px-2 py-1.5 rounded border text-[11px] font-medium transition-colors cursor-pointer ${
-                        settings.matcapStyle === m.id ? activeBtn : inactiveBtn
-                      }`}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
+              );
+            })}
+          </div>
         )}
 
-        {activeTab === 'surface' && (
-          <div className="space-y-3.5">
-            <SliderControl
-              id="ao-strength"
-              label="Voxel AO"
-              value={settings.aoStrength}
-              min={0}
-              max={1.5}
-              step={0.05}
-              displayValue={`${Math.round(settings.aoStrength * 100)}%`}
-              isLight={isLightStage}
-              onChange={(v) => onUpdateSettings({ aoStrength: v })}
-            />
-            <SliderControl
-              id="bevel-strength"
-              label="Bevel Seams"
-              value={settings.bevelStrength}
-              min={0}
-              max={1}
-              step={0.05}
-              displayValue={`${Math.round(settings.bevelStrength * 100)}%`}
-              isLight={isLightStage}
-              onChange={(v) => onUpdateSettings({ bevelStrength: v })}
-            />
-            <SliderControl
-              id="roughness-ctrl"
-              label="Roughness"
-              value={settings.roughness}
-              min={0.05}
-              max={1}
-              step={0.05}
-              displayValue={settings.roughness.toFixed(2)}
-              isLight={isLightStage}
-              onChange={(v) => onUpdateSettings({ roughness: v })}
-            />
-            <SliderControl
-              id="metalness-ctrl"
-              label="Metalness"
-              value={settings.metalness}
-              min={0}
-              max={1}
-              step={0.05}
-              displayValue={settings.metalness.toFixed(2)}
-              isLight={isLightStage}
-              onChange={(v) => onUpdateSettings({ metalness: v })}
-            />
-            <SliderControl
-              id="outline-ctrl"
-              label="Ink Edge"
-              value={settings.outlineStrength}
-              min={0}
-              max={1}
-              step={0.05}
-              displayValue={`${Math.round(settings.outlineStrength * 100)}%`}
-              isLight={isLightStage}
-              onChange={(v) => onUpdateSettings({ outlineStrength: v })}
-            />
+        {activeTab === 'material' && (
+          <div className="space-y-4">
+            <div className="space-y-3">
+              <span className={sectionLabel}>Surface & Shading</span>
+              <SliderControl
+                id="ao-strength"
+                label="Ambient Occlusion"
+                value={settings.aoStrength}
+                min={0}
+                max={1.5}
+                step={0.05}
+                displayValue={`${Math.round(settings.aoStrength * 100)}%`}
+                onChange={(v) => onUpdateSettings({ aoStrength: v })}
+              />
+              <SliderControl
+                id="roughness-ctrl"
+                label="Roughness"
+                value={settings.roughness}
+                min={0.05}
+                max={1}
+                step={0.05}
+                displayValue={settings.roughness.toFixed(2)}
+                onChange={(v) => onUpdateSettings({ roughness: v })}
+              />
+              <SliderControl
+                id="metalness-ctrl"
+                label="Metalness"
+                value={settings.metalness}
+                min={0}
+                max={1}
+                step={0.05}
+                displayValue={settings.metalness.toFixed(2)}
+                onChange={(v) => onUpdateSettings({ metalness: v })}
+              />
+              <SliderControl
+                id="outline-ctrl"
+                label="Silhouette Outline"
+                value={settings.outlineStrength}
+                min={0}
+                max={1}
+                step={0.05}
+                displayValue={`${Math.round(settings.outlineStrength * 100)}%`}
+                onChange={(v) => onUpdateSettings({ outlineStrength: v })}
+              />
+            </div>
 
             <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
               <div className="flex items-center justify-between">
-                <span className={`text-[11px] font-medium ${mutedText}`}>Section Slice</span>
+                <span className={sectionLabel}>Cross-Section Slice</span>
                 <div className={`flex items-center gap-0.5 p-0.5 rounded-md ${subBarBg}`}>
                   {(['none', 'x', 'y', 'z'] as SliceAxis[]).map((axis) => (
                     <button
@@ -385,9 +335,7 @@ export function ControlSidebar({
                       className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase transition-colors cursor-pointer ${
                         settings.sliceAxis === axis
                           ? 'bg-[#E05A2B] text-white'
-                          : isLightStage
-                            ? 'text-[#5A554E] hover:text-[#1B1A17]'
-                            : 'text-[#9CA4B3] hover:text-white'
+                          : 'text-[#9CA4B3] hover:text-white'
                       }`}
                     >
                       {axis === 'none' ? 'Off' : axis}
@@ -404,7 +352,6 @@ export function ControlSidebar({
                   max={1}
                   step={0.01}
                   displayValue={`${Math.round(settings.slicePosition * 100)}%`}
-                  isLight={isLightStage}
                   onChange={(v) => onUpdateSettings({ slicePosition: v })}
                 />
               )}
@@ -416,9 +363,7 @@ export function ControlSidebar({
           <div className="space-y-4">
             {/* Sky & Atmosphere Presets */}
             <div className="space-y-2">
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Sky & Atmosphere
-              </span>
+              <span className={sectionLabel}>Sky & Atmosphere</span>
               <div className="grid grid-cols-2 gap-1.5">
                 {(Object.keys(BACKDROP_THEMES) as BackdropPreset[]).map((key) => {
                   const theme = BACKDROP_THEMES[key];
@@ -454,12 +399,13 @@ export function ControlSidebar({
 
             {/* Sunlight Color & Direction */}
             <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
+              <span className={sectionLabel}>Sunlight</span>
               <div className="flex items-center justify-between gap-2">
                 <label
                   htmlFor="sun-color-input"
                   className={`text-[11px] font-medium ${mutedText}`}
                 >
-                  Sunlight Color
+                  Color
                 </label>
                 <div className="flex items-center gap-1.5">
                   {SUN_SWATCHES.map((sw) => (
@@ -490,44 +436,39 @@ export function ControlSidebar({
 
               <SliderControl
                 id="light-az"
-                label="Sun Azimuth"
+                label="Azimuth"
                 value={settings.lightAzimuth}
                 min={0}
                 max={360}
                 step={5}
                 displayValue={`${settings.lightAzimuth}°`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ lightAzimuth: v })}
               />
               <SliderControl
                 id="light-el"
-                label="Sun Elevation"
+                label="Elevation"
                 value={settings.lightElevation}
                 min={5}
                 max={85}
                 step={2}
                 displayValue={`${settings.lightElevation}°`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ lightElevation: v })}
               />
               <SliderControl
                 id="light-int"
-                label="Sun Intensity"
+                label="Intensity"
                 value={settings.lightIntensity}
                 min={0.3}
                 max={2.4}
                 step={0.05}
                 displayValue={settings.lightIntensity.toFixed(2)}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ lightIntensity: v })}
               />
             </div>
 
-            {/* Distance Fog & Additive Volumetric Clouds */}
+            {/* Distance Fog */}
             <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Distance Fog
-              </span>
+              <span className={sectionLabel}>Distance Fog</span>
               <div className="grid grid-cols-2 gap-1.5">
                 {FOG_MODES.map((fm) => (
                   <button
@@ -553,7 +494,6 @@ export function ControlSidebar({
                   max={900}
                   step={10}
                   displayValue={`${settings.fogRange} vox`}
-                  isLight={isLightStage}
                   onChange={(v) => onUpdateSettings({ fogRange: v })}
                 />
               )}
@@ -566,7 +506,6 @@ export function ControlSidebar({
                 max={2.5}
                 step={0.05}
                 displayValue={`${Math.round(settings.fogDensity * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ fogDensity: v })}
               />
 
@@ -578,7 +517,6 @@ export function ControlSidebar({
                 max={1}
                 step={0.02}
                 displayValue={`${Math.round(settings.heightFog * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ heightFog: v })}
               />
 
@@ -620,9 +558,7 @@ export function ControlSidebar({
             {/* Additive Volumetric Bottom Clouds */}
             <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
               <div className="flex items-center justify-between gap-2">
-                <span className={`text-[11px] font-medium ${mutedText}`}>
-                  Volumetric Clouds
-                </span>
+                <span className={sectionLabel}>Bottom Clouds</span>
                 <button
                   type="button"
                   aria-pressed={settings.volumetricClouds}
@@ -647,7 +583,6 @@ export function ControlSidebar({
                     max={1.5}
                     step={0.05}
                     displayValue={`${Math.round(settings.volumetricStrength * 100)}%`}
-                    isLight={isLightStage}
                     onChange={(v) => onUpdateSettings({ volumetricStrength: v })}
                   />
                   <SliderControl
@@ -658,7 +593,6 @@ export function ControlSidebar({
                     max={0.75}
                     step={0.02}
                     displayValue={`${Math.round(settings.cloudAltitude * 100)}%`}
-                    isLight={isLightStage}
                     onChange={(v) => onUpdateSettings({ cloudAltitude: v })}
                   />
                 </>
@@ -668,9 +602,9 @@ export function ControlSidebar({
             {/* VXL Ocean Water Tint & Waves (only when a .vxl map is loaded) */}
             {stats?.format === 'vxl' && (
               <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
-                <span className={`flex items-center gap-1.5 text-[11px] font-medium ${mutedText}`}>
+                <span className={`flex items-center gap-1.5 ${sectionLabel}`}>
                   <Waves className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>Map Water</span>
+                  <span>Map Ocean</span>
                 </span>
                 <div className="flex items-center justify-between gap-2">
                   <label
@@ -679,9 +613,7 @@ export function ControlSidebar({
                   >
                     Water Tint{' '}
                     {stats?.waterColorHex && !settings.waterColorOverride && (
-                      <span className="font-mono-tabular opacity-75">
-                        (from .vxl)
-                      </span>
+                      <span className="font-mono-tabular opacity-75">(from .vxl)</span>
                     )}
                   </label>
                   <div className="flex items-center gap-1.5">
@@ -718,7 +650,6 @@ export function ControlSidebar({
                   max={1}
                   step={0.05}
                   displayValue={`${Math.round(settings.waveStrength * 100)}%`}
-                  isLight={isLightStage}
                   onChange={(v) => onUpdateSettings({ waveStrength: v })}
                 />
               </div>
@@ -726,12 +657,10 @@ export function ControlSidebar({
           </div>
         )}
 
-        {activeTab === 'stage' && (
+        {activeTab === 'camera' && (
           <div className="space-y-4">
             <div className="space-y-2.5">
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Camera Navigation
-              </span>
+              <span className={sectionLabel}>Navigation</span>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
@@ -756,17 +685,21 @@ export function ControlSidebar({
               </div>
 
               {settings.cameraMode === 'free' && (
-                <SliderControl
-                  id="fly-speed"
-                  label="Fly Speed"
-                  value={settings.flySpeed}
-                  min={10}
-                  max={240}
-                  step={5}
-                  displayValue={`${settings.flySpeed} v/s`}
-                  isLight={isLightStage}
-                  onChange={(v) => onUpdateSettings({ flySpeed: v })}
-                />
+                <>
+                  <SliderControl
+                    id="fly-speed"
+                    label="Fly Speed"
+                    value={settings.flySpeed}
+                    min={10}
+                    max={240}
+                    step={5}
+                    displayValue={`${settings.flySpeed} v/s`}
+                    onChange={(v) => onUpdateSettings({ flySpeed: v })}
+                  />
+                  <p className={`text-[10px] leading-relaxed ${mutedText}`}>
+                    Drag to look · WASD fly · E/Q up/down · Shift boost · Scroll speed
+                  </p>
+                </>
               )}
 
               {!settings.orthographic && (
@@ -778,16 +711,13 @@ export function ControlSidebar({
                   max={95}
                   step={1}
                   displayValue={`${settings.cameraFov}°`}
-                  isLight={isLightStage}
                   onChange={(v) => onUpdateSettings({ cameraFov: v })}
                 />
               )}
             </div>
 
             <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Camera Framing
-              </span>
+              <span className={sectionLabel}>Framing</span>
               <div className="grid grid-cols-5 gap-1">
                 {CAMERA_PRESETS.map((cam) => (
                   <button
@@ -803,9 +733,7 @@ export function ControlSidebar({
             </div>
 
             <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Viewport Options
-              </span>
+              <span className={sectionLabel}>View Options</span>
               <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
@@ -827,33 +755,23 @@ export function ControlSidebar({
                 >
                   Turntable Spin
                 </button>
-                <button
-                  type="button"
-                  aria-pressed={settings.showPedestal}
-                  onClick={() => onUpdateSettings({ showPedestal: !settings.showPedestal })}
-                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
-                    settings.showPedestal ? activeBtn : inactiveBtn
-                  }`}
-                >
-                  KV6 Plate
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={settings.showGrid}
-                  onClick={() => onUpdateSettings({ showGrid: !settings.showGrid })}
-                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
-                    settings.showGrid ? activeBtn : inactiveBtn
-                  }`}
-                >
-                  Floor Grid
-                </button>
+                {(!stats || stats.format === 'kv6') && (
+                  <button
+                    type="button"
+                    aria-pressed={settings.showPedestal}
+                    onClick={() => onUpdateSettings({ showPedestal: !settings.showPedestal })}
+                    className={`col-span-2 px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
+                      settings.showPedestal ? activeBtn : inactiveBtn
+                    }`}
+                  >
+                    KV6 Display Plate
+                  </button>
+                )}
               </div>
             </div>
 
             <div className={`pt-3 border-t space-y-3 ${dividerClass}`}>
-              <span className={`block text-[11px] font-medium ${mutedText}`}>
-                Camera & Post-Processing
-              </span>
+              <span className={sectionLabel}>Lens & Post FX</span>
               <SliderControl
                 id="post-exposure"
                 label="Exposure"
@@ -862,7 +780,6 @@ export function ControlSidebar({
                 max={1.6}
                 step={0.02}
                 displayValue={settings.exposure.toFixed(2)}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ exposure: v })}
               />
               <SliderControl
@@ -873,7 +790,6 @@ export function ControlSidebar({
                 max={1.0}
                 step={0.05}
                 displayValue={`${Math.round(settings.tiltShift * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ tiltShift: v })}
               />
               <SliderControl
@@ -884,7 +800,6 @@ export function ControlSidebar({
                 max={1.0}
                 step={0.01}
                 displayValue={`${Math.round(settings.bloomStrength * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ bloomStrength: v })}
               />
               <SliderControl
@@ -895,7 +810,6 @@ export function ControlSidebar({
                 max={1}
                 step={0.05}
                 displayValue={`${Math.round(settings.vignette * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ vignette: v })}
               />
               <SliderControl
@@ -906,7 +820,6 @@ export function ControlSidebar({
                 max={1}
                 step={0.05}
                 displayValue={`${Math.round(settings.chromatic * 100)}%`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ chromatic: v })}
               />
               <SliderControl
@@ -917,12 +830,19 @@ export function ControlSidebar({
                 max={8}
                 step={1}
                 displayValue={settings.pixelate < 2 ? 'Off' : `${settings.pixelate}px`}
-                isLight={isLightStage}
                 onChange={(v) => onUpdateSettings({ pixelate: v })}
               />
             </div>
           </div>
         )}
+      </div>
+
+      {/* Subtle Keyboard Shortcut Footer */}
+      <div
+        className={`px-3.5 py-2 border-t text-[10px] flex items-center justify-between ${dividerClass} ${mutedText}`}
+      >
+        <span>H · Hide UI</span>
+        <span>F · Free Cam</span>
       </div>
     </aside>
   );

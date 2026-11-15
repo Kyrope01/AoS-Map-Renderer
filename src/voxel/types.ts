@@ -28,21 +28,17 @@ export interface RegionBounds {
   maxZ: number;
 }
 
+export type ShaderCategory = 'cinematic' | 'sculpt';
+
 export type ShaderMode =
   | 'pbr'
   | 'atmospheric'
   | 'diorama'
   | 'cinema'
-  | 'clay'
   | 'ao'
   | 'voxlap'
-  | 'toon'
   | 'rim'
-  | 'topographic'
-  | 'cyber'
-  | 'matcap'
-  | 'blueprint'
-  | 'hologram';
+  | 'matcap';
 
 export type BackdropPreset =
   | 'overcast'
@@ -66,15 +62,13 @@ export type MatcapStyle = 'chrome' | 'pearl' | 'terracotta' | 'jade';
 export interface RenderSettings {
   shaderMode: ShaderMode;
   backdrop: BackdropPreset;
-  // Surface & shader parameters
+  // Material & shader parameters
   aoStrength: number;       // 0..1.5
-  bevelStrength: number;    // 0..1.0
   roughness: number;        // 0.05..1.0
   metalness: number;        // 0..1.0
   outlineStrength: number;  // 0..1.0
-  clayTint: string;         // hex color for clay/blueprint tint
   matcapStyle: MatcapStyle;
-  // Section slicing
+  // Cross-section slicing
   sliceAxis: SliceAxis;
   slicePosition: number;    // 0..1.0 normalized
   // Sky, Sun & Fog + Additive Bottom Volumetric Clouds
@@ -95,11 +89,10 @@ export interface RenderSettings {
   cameraMode: CameraMode;   // orbit | free
   cameraFov: number;        // 24..95 degrees
   flySpeed: number;         // 10..240 units/sec
-  // Stage, Ocean & Post
+  // View, Ocean & Post
   showPedestal: boolean;    // circular plate for .kv6
   waterColorOverride: string; // empty = sampled .vxl water color
   waveStrength: number;     // 0..1.0 ocean ripple & shimmer
-  showGrid: boolean;
   autoRotate: boolean;
   orthographic: boolean;
   exposure: number;         // 0.6..1.6

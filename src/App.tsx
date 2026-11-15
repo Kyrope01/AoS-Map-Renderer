@@ -20,11 +20,9 @@ const DEFAULT_SETTINGS: RenderSettings = {
   shaderMode: 'atmospheric',
   backdrop: 'alpine',
   aoStrength: 0.9,
-  bevelStrength: 0.3,
   roughness: 0.55,
   metalness: 0.06,
   outlineStrength: 0,
-  clayTint: '#EAE4D8',
   matcapStyle: 'chrome',
   sliceAxis: 'none',
   slicePosition: 0.65,
@@ -47,7 +45,6 @@ const DEFAULT_SETTINGS: RenderSettings = {
   showPedestal: true,
   waterColorOverride: '',
   waveStrength: 0.45,
-  showGrid: false,
   autoRotate: false,
   orthographic: false,
   exposure: 1.0,
@@ -177,8 +174,6 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const isLightStage = BACKDROP_THEMES[settings.backdrop].isLight;
-
   return (
     <main
       className="relative w-screen h-screen overflow-hidden select-none"
@@ -210,7 +205,6 @@ export default function App() {
       {/* Minimal Top HUD */}
       <TopBar
         stats={stats}
-        isLightStage={isLightStage}
         sidebarCollapsed={sidebarCollapsed}
         cameraMode={settings.cameraMode}
         onOpenFile={() => fileInputRef.current?.click()}
@@ -231,13 +225,7 @@ export default function App() {
 
       {/* Minimal 1-line Free Cam Navigation Hint */}
       {settings.cameraMode === 'free' && !sidebarCollapsed && (
-        <div
-          className={`pointer-events-none fixed bottom-3 left-3 z-10 px-2.5 py-1.5 rounded-md border text-[11px] font-medium shadow-sm ${
-            isLightStage
-              ? 'bg-[#F7F4EE]/90 text-[#4B4741] border-black/10'
-              : 'bg-[#14171D]/88 text-[#C6CDD9] border-white/10'
-          }`}
-        >
+        <div className="pointer-events-none fixed bottom-3 left-3 z-10 px-2.5 py-1.5 rounded-md border text-[11px] font-medium shadow-sm bg-[#14171D]/90 text-[#C6CDD9] border-white/10">
           Drag look · WASD fly · E/Q up/down · Shift boost · Scroll speed · F exit
         </div>
       )}
@@ -246,24 +234,14 @@ export default function App() {
       {!loadedModel && (
         <div
           className={`pointer-events-none fixed inset-0 z-10 flex items-center justify-center p-4 transition-all duration-200 ${
-            sidebarCollapsed ? '' : 'sm:pr-[308px]'
+            sidebarCollapsed ? '' : 'sm:pr-[316px]'
           }`}
         >
-          <div
-            className={`pointer-events-auto max-w-sm w-full px-6 py-5 rounded-lg border shadow-lg text-center ${
-              isLightStage
-                ? 'bg-[#F7F4EE]/92 text-[#1B1A17] border-black/10'
-                : 'bg-[#14171D]/92 text-[#F3F1EC] border-white/10'
-            }`}
-          >
+          <div className="pointer-events-auto max-w-sm w-full px-6 py-5 rounded-lg border shadow-lg text-center bg-[#14171D]/92 text-[#F3F1EC] border-white/10">
             <p className="font-display text-base font-semibold tracking-tight">
               Import a Map or Model
             </p>
-            <p
-              className={`text-xs mt-1.5 leading-relaxed ${
-                isLightStage ? 'text-[#5E5951]' : 'text-[#9CA4B3]'
-              }`}
-            >
+            <p className="text-xs mt-1.5 leading-relaxed text-[#9CA4B3]">
               Drop an Ace of Spades <span className="font-mono-tabular">.vxl</span> map or Voxlap{' '}
               <span className="font-mono-tabular">.kv6</span> file anywhere on the canvas.
             </p>
@@ -302,7 +280,6 @@ export default function App() {
       <ControlSidebar
         settings={settings}
         stats={stats}
-        isLightStage={isLightStage}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((prev) => !prev)}
         onUpdateSettings={updateSettings}

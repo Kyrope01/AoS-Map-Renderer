@@ -141,6 +141,7 @@ const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _forward = new THREE.Vector3();
 const _right = new THREE.Vector3();
 const _moveVec = new THREE.Vector3();
+const _offsetVec = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
@@ -204,6 +205,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       renderer.setSize(width, height);
       renderer.shadowMap.enabled = !isSoftwareGl;
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.autoUpdate = false;
+      renderer.shadowMap.needsUpdate = true;
       renderer.domElement.style.display = 'block';
       renderer.domElement.style.width = '100%';
       renderer.domElement.style.height = '100%';
@@ -215,6 +218,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
       const handleContextRestored = () => {
         setContextLost(false);
+        renderer.shadowMap.needsUpdate = true;
       };
       renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
       renderer.domElement.addEventListener('webglcontextrestored', handleContextRestored);
@@ -222,7 +226,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const scene = new THREE.Scene();
       const initialTheme = BACKDROP_THEMES[settingsRef.current.backdrop];
       scene.background = new THREE.Color(initialTheme.bgHex);
-      // Fog is unified inside all shaders (Atmospheric / In-Game AoS / Volumetric)
       scene.fog = null;
 
       const pmrem = new THREE.PMREMGenerator(renderer);
@@ -293,16 +296,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       rimLight.position.set(-40, 28, -45);
       scene.add(rimLight);
 
-      let softboxA: THREE.RectAreaLight | null = null;
-      let softboxB: THREE.RectAreaLight | null = null;
       if (!isSoftwareGl) {
         RectAreaLightUniformsLib.init();
-        softboxA = new THREE.RectAreaLight('#FFFFFF', 1.8, 24, 14);
+        const softboxA = new THREE.RectAreaLight('#FFFFFF', 1.8, 24, 14);
         softboxA.position.set(28, 32, 24);
         softboxA.lookAt(0, 10, 0);
         scene.add(softboxA);
 
-        softboxB = new THREE.RectAreaLight('#C4DCFF', 1.1, 24, 14);
+        const softboxB = new THREE.RectAreaLight('#C4DCFF', 1.1, 24, 14);
         softboxB.position.set(-30, 22, -20);
         softboxB.lookAt(0, 10, 0);
         scene.add(softboxB);
@@ -321,7 +322,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       skyMesh.renderOrder = -10;
       scene.add(skyMesh);
 
-      // Infinite Procedural Water Ocean (for .vxl maps with water & atmospheric empty state)
+      // Infinite Procedural Water Ocean (for .vxl maps with water)
       const oceanGeo = new THREE.PlaneGeometry(8800, 8800, 1, 1);
       oceanGeo.rotateX(-Math.PI / 2);
       const { material: oceanMat, uniforms: oceanUniforms } = createOceanMaterial(sharedUniforms);
@@ -330,7 +331,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       oceanMesh.visible = false;
       scene.add(oceanMesh);
 
-      // Sub-surface catch plane at y=0.85 with identical lit+fogged water shading so 1px greedy-mesh T-junction cracks never show raw un-fogged color
+      // Sub-surface catch plane with identical lit+fogged water shading
       const underlayGeo = new THREE.PlaneGeometry(1, 1);
       underlayGeo.rotateX(-Math.PI / 2);
       const { material: underlayMat, uniforms: underlayUniforms } = createOceanMaterial(
@@ -343,7 +344,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       underlayMesh.visible = false;
       scene.add(underlayMesh);
 
-      // Studio Stage: Contact shadow, circular pedestal (for .kv6 models), and grid
+      // Studio Stage: Contact shadow & circular pedestal (strictly for .kv6 models; no floor grid)
       const stageGroup = new THREE.Group();
       scene.add(stageGroup);
 
@@ -393,15 +394,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       pedestalGroup.add(platterMesh, trimMesh, baseMesh);
       stageGroup.add(pedestalGroup);
-
-      let gridHelper = new THREE.GridHelper(
-        240,
-        24,
-        initialTheme.gridCenterColor,
-        initialTheme.gridColor,
-      );
-      gridHelper.position.y = -0.03;
-      stageGroup.add(gridHelper);
 
       // Voxel Model Mesh
       const voxelMesh = new THREE.Mesh<THREE.BufferGeometry, THREE.Material>(
@@ -544,7 +536,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const s = settingsRef.current;
         return (
           s.autoRotate ||
-          s.shaderMode === 'hologram' ||
           camAnimating ||
           hasActiveFreeKeys()
         );
@@ -578,9 +569,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         } else {
           if (s.autoRotate && !camAnimating) {
             const speed = 0.32 * dt;
-            const offset = activeCamera.position.clone().sub(controls.target);
-            offset.applyAxisAngle(THREE.Object3D.DEFAULT_UP, speed);
-            activeCamera.position.copy(controls.target).add(offset);
+            _offsetVec.copy(activeCamera.position).sub(controls.target);
+            _offsetVec.applyAxisAngle(_worldUp, speed);
+            activeCamera.position.copy(controls.target).add(_offsetVec);
           }
 
           if (camAnimating) {
@@ -770,7 +761,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       window.addEventListener('keyup', onKeyUp);
       window.addEventListener('blur', onWindowBlur);
 
-      let lastBackdrop = settingsRef.current.backdrop;
+      let lastLightAz = settingsRef.current.lightAzimuth;
+      let lastLightEl = settingsRef.current.lightElevation;
 
       const syncSettings = () => {
         const s = settingsRef.current;
@@ -784,25 +776,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const fogScale = Math.min(1, 32 / Math.max(32, modelRadius));
         const scaledFog = theme.fogDensity * s.fogDensity * fogScale;
 
-        if (s.backdrop !== lastBackdrop) {
-          lastBackdrop = s.backdrop;
-          const footprint = Math.max(
-            modelBounds.max.x - modelBounds.min.x,
-            modelBounds.max.z - modelBounds.min.z,
-          );
-          const gridExtent = Math.max(120, Math.ceil((footprint * 3) / 20) * 20);
-          stageGroup.remove(gridHelper);
-          gridHelper.dispose();
-          gridHelper = new THREE.GridHelper(
-            gridExtent,
-            24,
-            theme.gridCenterColor,
-            theme.gridColor,
-          );
-          gridHelper.position.y = -0.03;
-          stageGroup.add(gridHelper);
-        }
-
         hemiLight.color.set(theme.skyHex);
         hemiLight.groundColor.set(theme.groundHex);
 
@@ -815,6 +788,12 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         keyLight.position.copy(_lightDir).multiplyScalar(lightDist);
         keyLight.position.y += modelCenterY;
         keyLight.target.position.set(0, modelCenterY * 0.4, 0);
+
+        if (s.lightAzimuth !== lastLightAz || s.lightElevation !== lastLightEl) {
+          lastLightAz = s.lightAzimuth;
+          lastLightEl = s.lightElevation;
+          renderer.shadowMap.needsUpdate = true;
+        }
 
         _lightColor.set(s.sunColor || theme.defaultSunHex);
         keyLight.color.copy(_lightColor);
@@ -890,7 +869,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         contactShadow.visible = isKv6 && s.showPedestal;
         platterMat.color.set(theme.isLight ? '#DED8CE' : '#232730');
         baseMat.color.set(theme.isLight ? '#CFC7BB' : '#181B21');
-        gridHelper.visible = s.showGrid && !oceanMesh.visible;
 
         // Perspective vs Orthographic switch (only in Orbit mode; Free Cam uses Perspective)
         const targetCam =
@@ -931,6 +909,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
         if (!meshData) {
           voxelMesh.visible = false;
+          renderer.shadowMap.needsUpdate = true;
           syncSettings();
           return;
         }
@@ -964,20 +943,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const pedRadius = Math.max(12, footprint * 0.88);
         pedestalGroup.scale.set(pedRadius, 1, pedRadius);
 
-        stageGroup.remove(gridHelper);
-        gridHelper.dispose();
-        const theme = BACKDROP_THEMES[settingsRef.current.backdrop];
-        const gridExtent = Math.max(120, Math.ceil((footprint * 3) / 20) * 20);
-        gridHelper = new THREE.GridHelper(
-          gridExtent,
-          24,
-          theme.gridCenterColor,
-          theme.gridColor,
-        );
-        gridHelper.position.y = -0.03;
-        stageGroup.add(gridHelper);
-
         controls.maxDistance = Math.max(400, modelRadius * 9);
+        renderer.shadowMap.needsUpdate = true;
         syncSettings();
         applyPreset('iso', instantCamera);
       };
@@ -1067,7 +1034,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         trimMat.dispose();
         baseGeo.dispose();
         baseMat.dispose();
-        gridHelper.dispose();
         envTex.dispose();
         if (composer) composer.dispose();
         renderer.dispose();
