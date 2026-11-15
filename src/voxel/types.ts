@@ -72,7 +72,7 @@ export interface RenderSettings {
   slicePosition: number;    // 0..1.0 normalized
   // Sky, Sun & Fog + Additive Bottom Volumetric Clouds
   lightAzimuth: number;     // degrees 0..360
-  lightElevation: number;   // degrees 5..85
+  lightElevation: number;   // degrees 0..85
   lightIntensity: number;   // 0.3..2.5
   sunColor: string;         // hex sunlight color
   fogMode: FogMode;         // ingame | atmospheric
