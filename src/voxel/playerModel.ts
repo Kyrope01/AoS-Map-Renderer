@@ -81,9 +81,16 @@ export interface PlayerPoseTransforms {
   toolInArms: PartLocalTransform;
 }
 
+const MAX_PLAYER_CACHE_ENTRIES = 192;
+
 const baseGridCache = new Map<PlayerKv6PartKey, Kv6Grid>();
 const recoloredDataCache = new Map<string, BuiltVoxelMeshData>();
 const geometryCache = new Map<string, THREE.BufferGeometry>();
+
+function touchCacheEntry<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+}
 
 export function normalizeHexColor(hex: string, fallback = '#2B6CB0'): string {
   const trimmed = hex.trim();
@@ -171,7 +178,10 @@ export function buildPivotCenteredPartData(
   const normColor = customColorHex ? normalizeHexColor(customColorHex) : 'RAW';
   const cacheKey = `${partKey}:${normColor}`;
   const cached = recoloredDataCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    touchCacheEntry(recoloredDataCache, cacheKey, cached);
+    return cached;
+  }
 
   const baseGrid = getBasePlayerPartGrid(partKey);
   const grid = customColorHex ? recolorKv6SentinelGrid(baseGrid, normColor) : baseGrid;
@@ -190,8 +200,11 @@ export function buildPivotCenteredPartData(
     pos[i + 2] -= pivZ;
   }
 
-  if (recoloredDataCache.size > 256) {
-    recoloredDataCache.clear();
+  if (recoloredDataCache.size >= MAX_PLAYER_CACHE_ENTRIES) {
+    const oldestKey = recoloredDataCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      recoloredDataCache.delete(oldestKey);
+    }
   }
   recoloredDataCache.set(cacheKey, meshData);
   return meshData;
@@ -207,18 +220,35 @@ export function getPlayerPartGeometry(
   const normColor = customColorHex ? normalizeHexColor(customColorHex) : 'RAW';
   const cacheKey = `${partKey}:${normColor}`;
   const cached = geometryCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    touchCacheEntry(geometryCache, cacheKey, cached);
+    return cached;
+  }
 
   const data = buildPivotCenteredPartData(partKey, customColorHex);
   const hydrated = hydrateVoxelGeometry(data);
-  if (geometryCache.size > 256) {
-    for (const geo of geometryCache.values()) {
-      geo.dispose();
-    }
-    geometryCache.clear();
-  }
   geometryCache.set(cacheKey, hydrated.geometry);
   return hydrated.geometry;
+}
+
+/**
+ * Safely evicts and disposes the oldest unused cached player geometries above
+ * MAX_PLAYER_CACHE_ENTRIES without touching geometries actively mounted in the scene.
+ */
+export function prunePlayerModelGeometryCache(
+  activeGeometries: ReadonlySet<THREE.BufferGeometry>,
+  maxEntries = MAX_PLAYER_CACHE_ENTRIES,
+): number {
+  if (geometryCache.size <= maxEntries) return 0;
+  let disposed = 0;
+  for (const [key, geo] of geometryCache.entries()) {
+    if (geometryCache.size <= maxEntries) break;
+    if (activeGeometries.has(geo)) continue;
+    geometryCache.delete(key);
+    geo.dispose();
+    disposed++;
+  }
+  return disposed;
 }
 
 export function disposePlayerModelGeometryCache(): void {
@@ -226,6 +256,7 @@ export function disposePlayerModelGeometryCache(): void {
     geo.dispose();
   }
   geometryCache.clear();
+  recoloredDataCache.clear();
 }
 
 /**

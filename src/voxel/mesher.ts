@@ -67,6 +67,10 @@ function cornerAo(side1: boolean, side2: boolean, corner: boolean): number {
   return 3 - ((side1 ? 1 : 0) + (side2 ? 1 : 0) + (corner ? 1 : 0));
 }
 
+function cornerAoBit(side1: number, side2: number, corner: number): number {
+  return side1 && side2 ? 0 : 3 - side1 - side2 - corner;
+}
+
 const AO_LUT = new Float32Array([0.42, 0.64, 0.83, 1.0]);
 
 /**
@@ -82,23 +86,6 @@ for (let i = 0; i < 256; i++) {
   SRGB_LUT[i] = srgbToLinear(i);
 }
 
-/** Inline bitmask solidity check for VxlGrid (avoids closure & method-call overhead). */
-function vxlSolid(
-  solidLo: Uint32Array,
-  solidHi: Uint32Array,
-  w: number,
-  h: number,
-  d: number,
-  x: number,
-  y: number,
-  z: number,
-): boolean {
-  if (x < 0 || x >= w || y < 0 || y >= h || z < 0 || z >= d) return false;
-  const colIdx = z * w + x;
-  if (y < 32) return ((solidLo[colIdx] >>> y) & 1) !== 0;
-  return ((solidHi[colIdx] >>> (y - 32)) & 1) !== 0;
-}
-
 /**
  * Builds greedy-meshed typed arrays with per-vertex Voxel AO.
  * Pure worker-safe data builder (no Three.js BufferGeometry allocation).
@@ -107,15 +94,36 @@ export function buildVoxelGeometryData(
   grid: VoxelGrid,
   bounds?: RegionBounds,
 ): BuiltVoxelMeshData {
-  const minX = Math.max(0, bounds?.minX ?? 0);
-  const maxX = Math.min(grid.width, bounds?.maxX ?? grid.width);
-  const minY = Math.max(0, bounds?.minY ?? 0);
-  const maxY = Math.min(grid.height, bounds?.maxY ?? grid.height);
-  const minZ = Math.max(0, bounds?.minZ ?? 0);
-  const maxZ = Math.min(grid.depth, bounds?.maxZ ?? grid.depth);
+  const minX = Math.max(0, Math.min(grid.width, bounds?.minX ?? 0));
+  const maxX = Math.max(minX, Math.min(grid.width, bounds?.maxX ?? grid.width));
+  const minY = Math.max(0, Math.min(grid.height, bounds?.minY ?? 0));
+  const maxY = Math.max(minY, Math.min(grid.height, bounds?.maxY ?? grid.height));
+  const minZ = Math.max(0, Math.min(grid.depth, bounds?.minZ ?? 0));
+  const maxZ = Math.max(minZ, Math.min(grid.depth, bounds?.maxZ ?? grid.depth));
 
   const dims = [maxX - minX, maxY - minY, maxZ - minZ];
   const mins = [minX, minY, minZ];
+
+  const waterColorHex =
+    grid.waterColor !== null
+      ? `#${(grid.waterColor & 0xffffff).toString(16).padStart(6, '0')}`
+      : null;
+
+  if (dims[0] === 0 || dims[1] === 0 || dims[2] === 0) {
+    return {
+      positions: new Float32Array(0),
+      normals: new Float32Array(0),
+      colors: new Float32Array(0),
+      ao: new Float32Array(0),
+      indices: new Uint16Array(0),
+      format: grid.format,
+      waterColorHex,
+      quadCount: 0,
+      triangleCount: 0,
+      center: [0, dims[1] * 0.5, 0],
+      size: [dims[0], dims[1], dims[2]],
+    };
+  }
 
   const centerX = mins[0] + dims[0] * 0.5;
   const baseY = mins[1];
@@ -147,7 +155,8 @@ export function buildVoxelGeometryData(
     quadCap = nextCap;
   };
 
-  // Reuse mask arrays across all 6 faces
+  // Reuse mask arrays across all 6 faces. The greedy pass zeros every non-zero
+  // cell it visits, so `maskColor` returns to all-zero after every active slice.
   const maxSliceArea = Math.max(
     dims[0] * dims[1],
     dims[0] * dims[2],
@@ -156,18 +165,29 @@ export function buildVoxelGeometryData(
   const maskColor = new Uint32Array(maxSliceArea);
   const maskAo = new Uint16Array(maxSliceArea);
 
-  // Pre-allocated scratch arrays for non-vxl fallback & quad corner writes
+  // Pre-allocated scratch arrays for non-vxl fallback
   const pos = [0, 0, 0];
   const check = [0, 0, 0];
-  const p0 = [0, 0, 0];
-  const p1 = [0, 0, 0];
-  const p2 = [0, 0, 0];
-  const p3 = [0, 0, 0];
 
   const vxlGrid = grid instanceof VxlGrid ? grid : null;
   const gridW = grid.width;
   const gridH = grid.height;
   const gridD = grid.depth;
+
+  // Precompute active Y bitmasks within bounds so horizontal slices skip empty sky layers instantly.
+  let usedYLo = 0;
+  let usedYHi = 0;
+  if (vxlGrid) {
+    const solidLo = vxlGrid.solidLo;
+    const solidHi = vxlGrid.solidHi;
+    for (let z = minZ; z < maxZ; z++) {
+      const row = z * gridW;
+      for (let x = minX; x < maxX; x++) {
+        usedYLo |= solidLo[row + x];
+        usedYHi |= solidHi[row + x];
+      }
+    }
+  }
 
   for (let fIdx = 0; fIdx < 6; fIdx++) {
     const face = FACES[fIdx];
@@ -175,53 +195,120 @@ export function buildVoxelGeometryData(
     const dMax = dims[axis];
     const uMax = dims[uAxis];
     const vMax = dims[vAxis];
-    const sliceLen = uMax * vMax;
     const nx = normal[0];
     const ny = normal[1];
     const nz = normal[2];
     const dOffset = dir > 0 ? 1 : 0;
 
     for (let d = 0; d < dMax; d++) {
-      maskColor.fill(0, 0, sliceLen);
       let anyFace = false;
 
       const worldD = mins[axis] + d;
       const neighborD = worldD + dir;
 
-      if (vxlGrid && axis === 0) {
+      if (vxlGrid && (axis === 0 || axis === 2)) {
         const solidLo = vxlGrid.solidLo;
         const solidHi = vxlGrid.solidHi;
-        const inBoundsNeighbor = neighborD >= 0 && neighborD < gridW;
+        const isXAxis = axis === 0;
+        const inBoundsNeighbor = neighborD >= 0 && neighborD < (isXAxis ? gridW : gridD);
+        const colStride = isXAxis ? gridW : 1;
+        const nBaseOffset = isXAxis ? neighborD : neighborD * gridW;
+        const nLastU = isXAxis ? gridD - 1 : gridW - 1;
+        const minUWorld = isXAxis ? minZ : minX;
+        const dCoord = isXAxis ? worldD : 0;
+        const colBaseZ = isXAxis ? 0 : worldD * gridW;
 
         for (let u = 0; u < uMax; u++) {
-          const worldZ = mins[2] + u;
-          const colIdx = worldZ * gridW + worldD;
-          const nIdx = worldZ * gridW + neighborD;
-          const expLo = inBoundsNeighbor
-            ? solidLo[colIdx] & ~solidLo[nIdx]
-            : solidLo[colIdx];
-          const expHi = inBoundsNeighbor
-            ? solidHi[colIdx] & ~solidHi[nIdx]
-            : solidHi[colIdx];
+          const worldU = minUWorld + u;
+          const colIdx = isXAxis ? worldU * gridW + dCoord : colBaseZ + worldU;
+          const nIdx = isXAxis ? worldU * gridW + nBaseOffset : nBaseOffset + worldU;
+          const expLo = inBoundsNeighbor ? solidLo[colIdx] & ~solidLo[nIdx] : solidLo[colIdx];
+          const expHi = inBoundsNeighbor ? solidHi[colIdx] & ~solidHi[nIdx] : solidHi[colIdx];
+          if ((expLo | expHi) === 0) continue;
+
+          let cLo = 0;
+          let cHi = 0;
+          let mULo = 0;
+          let mUHi = 0;
+          let pULo = 0;
+          let pUHi = 0;
+          if (inBoundsNeighbor) {
+            cLo = solidLo[nIdx];
+            cHi = solidHi[nIdx];
+            if (worldU > 0) {
+              mULo = solidLo[nIdx - colStride];
+              mUHi = solidHi[nIdx - colStride];
+            }
+            if (worldU < nLastU) {
+              pULo = solidLo[nIdx + colStride];
+              pUHi = solidHi[nIdx + colStride];
+            }
+          }
 
           let bits = expLo;
           while (bits !== 0) {
             const worldY = 31 - Math.clz32(bits & -bits);
             bits &= bits - 1;
-            const v = worldY - mins[1];
+            const v = worldY - minY;
             if (v < 0 || v >= vMax) continue;
-            const col = vxlGrid.getColorAtSolid(colIdx, worldD, worldY, worldZ);
+            const col = vxlGrid.getColorAtSolid(
+              colIdx,
+              isXAxis ? worldD : worldU,
+              worldY,
+              isXAxis ? worldU : worldD,
+            );
 
             let aoSig = 0xff;
             if (inBoundsNeighbor) {
-              const mU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY, worldZ - 1);
-              const pU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY, worldZ + 1);
-              const mV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ);
-              const pV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ);
-              const ao00 = cornerAo(mU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ - 1));
-              const ao10 = cornerAo(pU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ + 1));
-              const ao11 = cornerAo(pU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ + 1));
-              const ao01 = cornerAo(mU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ - 1));
+              const mU = (mULo >>> worldY) & 1;
+              const pU = (pULo >>> worldY) & 1;
+              let mV: number;
+              let c00: number;
+              let c10: number;
+              let pV: number;
+              let c11: number;
+              let c01: number;
+              if (worldY > 0 && worldY < 31 && worldY + 1 < gridH) {
+                const ym1 = worldY - 1;
+                const yp1 = worldY + 1;
+                mV = (cLo >>> ym1) & 1;
+                c00 = (mULo >>> ym1) & 1;
+                c10 = (pULo >>> ym1) & 1;
+                pV = (cLo >>> yp1) & 1;
+                c11 = (pULo >>> yp1) & 1;
+                c01 = (mULo >>> yp1) & 1;
+              } else {
+                const ym1 = worldY - 1;
+                if (ym1 >= 0) {
+                  mV = (cLo >>> ym1) & 1;
+                  c00 = (mULo >>> ym1) & 1;
+                  c10 = (pULo >>> ym1) & 1;
+                } else {
+                  mV = 0;
+                  c00 = 0;
+                  c10 = 0;
+                }
+                const yp1 = worldY + 1;
+                if (yp1 < gridH) {
+                  if (yp1 < 32) {
+                    pV = (cLo >>> yp1) & 1;
+                    c11 = (pULo >>> yp1) & 1;
+                    c01 = (mULo >>> yp1) & 1;
+                  } else {
+                    pV = cHi & 1;
+                    c11 = pUHi & 1;
+                    c01 = mUHi & 1;
+                  }
+                } else {
+                  pV = 0;
+                  c11 = 0;
+                  c01 = 0;
+                }
+              }
+              const ao00 = cornerAoBit(mU, mV, c00);
+              const ao10 = cornerAoBit(pU, mV, c10);
+              const ao11 = cornerAoBit(pU, pV, c11);
+              const ao01 = cornerAoBit(mU, pV, c01);
               aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
             }
 
@@ -233,94 +320,63 @@ export function buildVoxelGeometryData(
 
           bits = expHi;
           while (bits !== 0) {
-            const worldY = 32 + (31 - Math.clz32(bits & -bits));
+            const bit = 31 - Math.clz32(bits & -bits);
+            const worldY = 32 + bit;
             bits &= bits - 1;
-            const v = worldY - mins[1];
+            const v = worldY - minY;
             if (v < 0 || v >= vMax) continue;
-            const col = vxlGrid.getColorAtSolid(colIdx, worldD, worldY, worldZ);
+            const col = vxlGrid.getColorAtSolid(
+              colIdx,
+              isXAxis ? worldD : worldU,
+              worldY,
+              isXAxis ? worldU : worldD,
+            );
 
             let aoSig = 0xff;
             if (inBoundsNeighbor) {
-              const mU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY, worldZ - 1);
-              const pU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY, worldZ + 1);
-              const mV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ);
-              const pV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ);
-              const ao00 = cornerAo(mU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ - 1));
-              const ao10 = cornerAo(pU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY - 1, worldZ + 1));
-              const ao11 = cornerAo(pU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ + 1));
-              const ao01 = cornerAo(mU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, neighborD, worldY + 1, worldZ - 1));
-              aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
-            }
-
-            const cell = v * uMax + u;
-            maskColor[cell] = col;
-            maskAo[cell] = aoSig;
-            anyFace = true;
-          }
-        }
-      } else if (vxlGrid && axis === 2) {
-        const solidLo = vxlGrid.solidLo;
-        const solidHi = vxlGrid.solidHi;
-        const inBoundsNeighbor = neighborD >= 0 && neighborD < gridD;
-        const colBase = worldD * gridW;
-        const nBase = neighborD * gridW;
-
-        for (let u = 0; u < uMax; u++) {
-          const worldX = mins[0] + u;
-          const colIdx = colBase + worldX;
-          const nIdx = nBase + worldX;
-          const expLo = inBoundsNeighbor
-            ? solidLo[colIdx] & ~solidLo[nIdx]
-            : solidLo[colIdx];
-          const expHi = inBoundsNeighbor
-            ? solidHi[colIdx] & ~solidHi[nIdx]
-            : solidHi[colIdx];
-
-          let bits = expLo;
-          while (bits !== 0) {
-            const worldY = 31 - Math.clz32(bits & -bits);
-            bits &= bits - 1;
-            const v = worldY - mins[1];
-            if (v < 0 || v >= vMax) continue;
-            const col = vxlGrid.getColorAtSolid(colIdx, worldX, worldY, worldD);
-
-            let aoSig = 0xff;
-            if (inBoundsNeighbor) {
-              const mU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY, neighborD);
-              const pU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY, neighborD);
-              const mV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, worldY - 1, neighborD);
-              const pV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, worldY + 1, neighborD);
-              const ao00 = cornerAo(mU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY - 1, neighborD));
-              const ao10 = cornerAo(pU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY - 1, neighborD));
-              const ao11 = cornerAo(pU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY + 1, neighborD));
-              const ao01 = cornerAo(mU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY + 1, neighborD));
-              aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
-            }
-
-            const cell = v * uMax + u;
-            maskColor[cell] = col;
-            maskAo[cell] = aoSig;
-            anyFace = true;
-          }
-
-          bits = expHi;
-          while (bits !== 0) {
-            const worldY = 32 + (31 - Math.clz32(bits & -bits));
-            bits &= bits - 1;
-            const v = worldY - mins[1];
-            if (v < 0 || v >= vMax) continue;
-            const col = vxlGrid.getColorAtSolid(colIdx, worldX, worldY, worldD);
-
-            let aoSig = 0xff;
-            if (inBoundsNeighbor) {
-              const mU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY, neighborD);
-              const pU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY, neighborD);
-              const mV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, worldY - 1, neighborD);
-              const pV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, worldY + 1, neighborD);
-              const ao00 = cornerAo(mU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY - 1, neighborD));
-              const ao10 = cornerAo(pU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY - 1, neighborD));
-              const ao11 = cornerAo(pU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, worldY + 1, neighborD));
-              const ao01 = cornerAo(mU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, worldY + 1, neighborD));
+              const mU = (mUHi >>> bit) & 1;
+              const pU = (pUHi >>> bit) & 1;
+              let mV: number;
+              let c00: number;
+              let c10: number;
+              let pV: number;
+              let c11: number;
+              let c01: number;
+              if (bit > 0 && worldY + 1 < gridH) {
+                const bm1 = bit - 1;
+                const bp1 = bit + 1;
+                mV = (cHi >>> bm1) & 1;
+                c00 = (mUHi >>> bm1) & 1;
+                c10 = (pUHi >>> bm1) & 1;
+                pV = (cHi >>> bp1) & 1;
+                c11 = (pUHi >>> bp1) & 1;
+                c01 = (mUHi >>> bp1) & 1;
+              } else {
+                if (bit > 0) {
+                  const bm1 = bit - 1;
+                  mV = (cHi >>> bm1) & 1;
+                  c00 = (mUHi >>> bm1) & 1;
+                  c10 = (pUHi >>> bm1) & 1;
+                } else {
+                  mV = (cLo >>> 31) & 1;
+                  c00 = (mULo >>> 31) & 1;
+                  c10 = (pULo >>> 31) & 1;
+                }
+                if (worldY + 1 < gridH) {
+                  const bp1 = bit + 1;
+                  pV = (cHi >>> bp1) & 1;
+                  c11 = (pUHi >>> bp1) & 1;
+                  c01 = (mUHi >>> bp1) & 1;
+                } else {
+                  pV = 0;
+                  c11 = 0;
+                  c01 = 0;
+                }
+              }
+              const ao00 = cornerAoBit(mU, mV, c00);
+              const ao10 = cornerAoBit(pU, mV, c10);
+              const ao11 = cornerAoBit(pU, pV, c11);
+              const ao01 = cornerAoBit(mU, pV, c01);
               aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
             }
 
@@ -331,43 +387,69 @@ export function buildVoxelGeometryData(
           }
         }
       } else if (vxlGrid && axis === 1) {
-        const solidLo = vxlGrid.solidLo;
-        const solidHi = vxlGrid.solidHi;
         const worldY = worldD;
+        const bitShift = worldY < 32 ? worldY : worldY - 32;
+        const usedMask = worldY < 32 ? usedYLo : usedYHi;
+        if (((usedMask >>> bitShift) & 1) === 0) continue;
+
+        const curMask = 1 << bitShift;
+        const solidArr = worldY < 32 ? vxlGrid.solidLo : vxlGrid.solidHi;
         const neighborY = neighborD;
         const inBoundsNeighbor = neighborY >= 0 && neighborY < gridH;
-        const useHi = worldY >= 32;
-        const bitShift = useHi ? worldY - 32 : worldY;
-        const nUseHi = neighborY >= 32;
-        const nBitShift = nUseHi ? neighborY - 32 : neighborY;
-        const solidArr = useHi ? solidHi : solidLo;
-        const nSolidArr = nUseHi ? solidHi : solidLo;
+        const nBitShift = neighborY < 32 ? neighborY : neighborY - 32;
+        const nMask = inBoundsNeighbor ? 1 << nBitShift : 0;
+        const nSolidArr = neighborY < 32 ? vxlGrid.solidLo : vxlGrid.solidHi;
+        const lastW = gridW - 1;
+        const lastD = gridD - 1;
 
         for (let v = 0; v < vMax; v++) {
-          const worldZ = mins[2] + v;
+          const worldZ = minZ + v;
           const rowOffset = v * uMax;
           const zBase = worldZ * gridW;
+          const hasMZ = worldZ > 0;
+          const hasPZ = worldZ < lastD;
+
           for (let u = 0; u < uMax; u++) {
-            const worldX = mins[0] + u;
+            const worldX = minX + u;
             const colIdx = zBase + worldX;
-            if (((solidArr[colIdx] >>> bitShift) & 1) === 0) continue;
-            if (inBoundsNeighbor && ((nSolidArr[colIdx] >>> nBitShift) & 1) !== 0) {
-              continue;
-            }
+            if ((solidArr[colIdx] & curMask) === 0) continue;
+            if (inBoundsNeighbor && (nSolidArr[colIdx] & nMask) !== 0) continue;
 
             const col = vxlGrid.getColorAtSolid(colIdx, worldX, worldY, worldZ);
 
             let aoSig = 0xff;
             if (inBoundsNeighbor) {
-              const mU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, neighborY, worldZ);
-              const pU = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, neighborY, worldZ);
-              const mV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, neighborY, worldZ - 1);
-              const pV = vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX, neighborY, worldZ + 1);
-              const ao00 = cornerAo(mU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, neighborY, worldZ - 1));
-              const ao10 = cornerAo(pU, mV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, neighborY, worldZ - 1));
-              const ao11 = cornerAo(pU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX + 1, neighborY, worldZ + 1));
-              const ao01 = cornerAo(mU, pV, vxlSolid(solidLo, solidHi, gridW, gridH, gridD, worldX - 1, neighborY, worldZ + 1));
-              aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
+              if (worldX > 0 && worldX < lastW && hasMZ && hasPZ) {
+                const mU = (nSolidArr[colIdx - 1] & nMask) !== 0 ? 1 : 0;
+                const pU = (nSolidArr[colIdx + 1] & nMask) !== 0 ? 1 : 0;
+                const mV = (nSolidArr[colIdx - gridW] & nMask) !== 0 ? 1 : 0;
+                const pV = (nSolidArr[colIdx + gridW] & nMask) !== 0 ? 1 : 0;
+                const ao00 =
+                  mU & mV ? 0 : 3 - mU - mV - ((nSolidArr[colIdx - gridW - 1] & nMask) !== 0 ? 1 : 0);
+                const ao10 =
+                  pU & mV ? 0 : 3 - pU - mV - ((nSolidArr[colIdx - gridW + 1] & nMask) !== 0 ? 1 : 0);
+                const ao11 =
+                  pU & pV ? 0 : 3 - pU - pV - ((nSolidArr[colIdx + gridW + 1] & nMask) !== 0 ? 1 : 0);
+                const ao01 =
+                  mU & pV ? 0 : 3 - mU - pV - ((nSolidArr[colIdx + gridW - 1] & nMask) !== 0 ? 1 : 0);
+                aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
+              } else {
+                const hasMX = worldX > 0;
+                const hasPX = worldX < lastW;
+                const mU = hasMX && (nSolidArr[colIdx - 1] & nMask) !== 0 ? 1 : 0;
+                const pU = hasPX && (nSolidArr[colIdx + 1] & nMask) !== 0 ? 1 : 0;
+                const mV = hasMZ && (nSolidArr[colIdx - gridW] & nMask) !== 0 ? 1 : 0;
+                const pV = hasPZ && (nSolidArr[colIdx + gridW] & nMask) !== 0 ? 1 : 0;
+                const c00 = hasMX && hasMZ && (nSolidArr[colIdx - gridW - 1] & nMask) !== 0 ? 1 : 0;
+                const c10 = hasPX && hasMZ && (nSolidArr[colIdx - gridW + 1] & nMask) !== 0 ? 1 : 0;
+                const c11 = hasPX && hasPZ && (nSolidArr[colIdx + gridW + 1] & nMask) !== 0 ? 1 : 0;
+                const c01 = hasMX && hasPZ && (nSolidArr[colIdx + gridW - 1] & nMask) !== 0 ? 1 : 0;
+                const ao00 = cornerAoBit(mU, mV, c00);
+                const ao10 = cornerAoBit(pU, mV, c10);
+                const ao11 = cornerAoBit(pU, pV, c11);
+                const ao01 = cornerAoBit(mU, pV, c01);
+                aoSig = ao00 | (ao10 << 2) | (ao11 << 4) | (ao01 << 6);
+              }
             }
 
             const cell = rowOffset + u;
@@ -424,10 +506,8 @@ export function buildVoxelGeometryData(
       if (!anyFace) continue;
 
       const planeD = worldD + dOffset;
-      p0[axis] = planeD;
-      p1[axis] = planeD;
-      p2[axis] = planeD;
-      p3[axis] = planeD;
+      const uMinWorld = mins[uAxis];
+      const vMinWorld = mins[vAxis];
 
       // Greedy 2D rectangle merge over (u, v)
       for (let v = 0; v < vMax; v++) {
@@ -478,15 +558,48 @@ export function buildVoxelGeometryData(
             growBuffers();
           }
 
-          const worldU0 = mins[uAxis] + u;
-          const worldV0 = mins[vAxis] + v;
+          const worldU0 = uMinWorld + u;
+          const worldV0 = vMinWorld + v;
           const worldU1 = worldU0 + w;
           const worldV1 = worldV0 + h;
 
-          p0[uAxis] = worldU0; p0[vAxis] = worldV0;
-          p1[uAxis] = worldU1; p1[vAxis] = worldV0;
-          p2[uAxis] = worldU1; p2[vAxis] = worldV1;
-          p3[uAxis] = worldU0; p3[vAxis] = worldV1;
+          const baseVert = quadCount * 4;
+          const b3 = baseVert * 3;
+
+          if (axis === 1) {
+            // u = X, v = Z, d = Y
+            const py = planeD - baseY;
+            const x0 = worldU0 - centerX;
+            const x1 = worldU1 - centerX;
+            const z0 = worldV0 - centerZ;
+            const z1 = worldV1 - centerZ;
+            posArr[b3] = x0; posArr[b3 + 1] = py; posArr[b3 + 2] = z0;
+            posArr[b3 + 3] = x1; posArr[b3 + 4] = py; posArr[b3 + 5] = z0;
+            posArr[b3 + 6] = x1; posArr[b3 + 7] = py; posArr[b3 + 8] = z1;
+            posArr[b3 + 9] = x0; posArr[b3 + 10] = py; posArr[b3 + 11] = z1;
+          } else if (axis === 0) {
+            // u = Z, v = Y, d = X
+            const px = planeD - centerX;
+            const z0 = worldU0 - centerZ;
+            const z1 = worldU1 - centerZ;
+            const y0 = worldV0 - baseY;
+            const y1 = worldV1 - baseY;
+            posArr[b3] = px; posArr[b3 + 1] = y0; posArr[b3 + 2] = z0;
+            posArr[b3 + 3] = px; posArr[b3 + 4] = y0; posArr[b3 + 5] = z1;
+            posArr[b3 + 6] = px; posArr[b3 + 7] = y1; posArr[b3 + 8] = z1;
+            posArr[b3 + 9] = px; posArr[b3 + 10] = y1; posArr[b3 + 11] = z0;
+          } else {
+            // axis === 2: u = X, v = Y, d = Z
+            const pz = planeD - centerZ;
+            const x0 = worldU0 - centerX;
+            const x1 = worldU1 - centerX;
+            const y0 = worldV0 - baseY;
+            const y1 = worldV1 - baseY;
+            posArr[b3] = x0; posArr[b3 + 1] = y0; posArr[b3 + 2] = pz;
+            posArr[b3 + 3] = x1; posArr[b3 + 4] = y0; posArr[b3 + 5] = pz;
+            posArr[b3 + 6] = x1; posArr[b3 + 7] = y1; posArr[b3 + 8] = pz;
+            posArr[b3 + 9] = x0; posArr[b3 + 10] = y1; posArr[b3 + 11] = pz;
+          }
 
           const r = SRGB_LUT[(c >>> 16) & 0xff];
           const g = SRGB_LUT[(c >>> 8) & 0xff];
@@ -496,14 +609,6 @@ export function buildVoxelGeometryData(
           const a10 = AO_LUT[(aoSig >>> 2) & 3];
           const a11 = AO_LUT[(aoSig >>> 4) & 3];
           const a01 = AO_LUT[(aoSig >>> 6) & 3];
-
-          const baseVert = quadCount * 4;
-          const b3 = baseVert * 3;
-
-          posArr[b3] = p0[0] - centerX; posArr[b3 + 1] = p0[1] - baseY; posArr[b3 + 2] = p0[2] - centerZ;
-          posArr[b3 + 3] = p1[0] - centerX; posArr[b3 + 4] = p1[1] - baseY; posArr[b3 + 5] = p1[2] - centerZ;
-          posArr[b3 + 6] = p2[0] - centerX; posArr[b3 + 7] = p2[1] - baseY; posArr[b3 + 8] = p2[2] - centerZ;
-          posArr[b3 + 9] = p3[0] - centerX; posArr[b3 + 10] = p3[1] - baseY; posArr[b3 + 11] = p3[2] - centerZ;
 
           normArr[b3] = nx; normArr[b3 + 1] = ny; normArr[b3 + 2] = nz;
           normArr[b3 + 3] = nx; normArr[b3 + 4] = ny; normArr[b3 + 5] = nz;
@@ -583,11 +688,6 @@ export function buildVoxelGeometryData(
     indices = idxArr.slice(0, iCount);
   }
 
-  const waterColorHex =
-    grid.waterColor !== null
-      ? `#${(grid.waterColor & 0xffffff).toString(16).padStart(6, '0')}`
-      : null;
-
   return {
     positions,
     normals,
@@ -613,8 +713,23 @@ export function hydrateVoxelGeometry(data: BuiltVoxelMeshData): BuiltVoxelMesh {
   geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
   geometry.setAttribute('aAo', new THREE.BufferAttribute(data.ao, 1));
   geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
+
+  if (data.positions.length === 0) {
+    const hx = Math.max(0.5, data.size[0] * 0.5);
+    const hy = Math.max(1, data.size[1]);
+    const hz = Math.max(0.5, data.size[2] * 0.5);
+    geometry.boundingBox = new THREE.Box3(
+      new THREE.Vector3(-hx, 0, -hz),
+      new THREE.Vector3(hx, hy, hz),
+    );
+    geometry.boundingSphere = new THREE.Sphere(
+      new THREE.Vector3(0, hy * 0.5, 0),
+      Math.hypot(hx, hy * 0.5, hz),
+    );
+  } else {
+    geometry.computeBoundingBox();
+    geometry.computeBoundingSphere();
+  }
 
   return {
     geometry,

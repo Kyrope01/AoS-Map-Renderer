@@ -132,7 +132,7 @@ test('every voxel material opts into local clipping and shadow clipping', () => 
   bank.dispose();
 });
 
-test('voxel light shaders bind uShadowCasterCount, cull dim lights, and cap shadow rays', () => {
+test('voxel light shaders bind uShadowCasterCount, cull dim lights, and split shadowed vs unshadowed loops', () => {
   const shared = createSharedUniforms();
   const bank = createMaterialBank(shared);
   const pbrShader = {
@@ -145,6 +145,7 @@ test('voxel light shaders bind uShadowCasterCount, cull dim lights, and cap shad
     null as never,
   );
   assert.equal(pbrShader.uniforms.uShadowCasterCount, shared.uShadowCasterCount);
+  assert.equal(pbrShader.uniforms.uIsOrtho, shared.uIsOrtho);
   assert.equal(MAX_VOXEL_SHADOW_CASTERS, 16);
 
   const fragments = [
@@ -154,8 +155,13 @@ test('voxel light shaders bind uShadowCasterCount, cull dim lights, and cap shad
   bank.dispose();
   for (const frag of fragments) {
     assert.match(frag, /uniform int uShadowCasterCount;/);
+    assert.match(frag, /uniform float uIsOrtho;/);
     assert.match(frag, /contrib < 0\.004/);
-    assert.match(frag, /i < uShadowCasterCount\s*\?\s*voxelShadowVisibility\(/);
+    assert.match(frag, /for \(int i = 0; i < 16; i\+\+\)/);
+    assert.match(frag, /for \(int i = 16; i < 512; i\+\+\)/);
+    assert.match(frag, /voxelShadowVisibility\(/);
+    assert.match(frag, /floor\(\(packed \+ 0\.01\) \/ exp2\(mod\(cell\.x, 8\.0\)\)\)/);
+    assert.match(frag, /max\(0\.0\d*, mix\(1\.0,/);
   }
 });
 

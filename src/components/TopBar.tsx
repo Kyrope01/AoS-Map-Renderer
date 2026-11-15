@@ -123,7 +123,7 @@ export function TopBar({
       if (match) targetW = parseInt(match[1], 10);
     }
     if (targetW > 0) {
-      setUpscaleWidth(Math.min(maxExportWidth, Math.max(64, targetW)));
+      setUpscaleWidth(Math.min(maxExportWidth, Math.max(baseRes.width, targetW)));
     }
   };
 
@@ -234,7 +234,7 @@ export function TopBar({
                         type="range"
                         min={minSliderVal}
                         max={maxExportWidth}
-                        step={16}
+                        step={1}
                         value={clampedSliderVal}
                         onChange={(e) => setUpscaleWidth(parseInt(e.target.value, 10))}
                         style={{
@@ -247,6 +247,7 @@ export function TopBar({
                         <input
                           ref={customInputRef}
                           type="text"
+                          aria-label="Custom export width"
                           value={customInputVal}
                           onChange={(e) => setCustomInputVal(e.target.value)}
                           onBlur={commitCustomRes}

@@ -48,7 +48,7 @@ interface PanelSliderProps {
 }
 
 function PanelSlider({ id, label, value, min, max, step, displayValue, onChange }: PanelSliderProps) {
-  const pct = ((value - min) / (max - min)) * 100;
+  const pct = max > min ? Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100)) : 0;
   const trackBg = `linear-gradient(to right, #E05A2B ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
   return (
     <div className="flex flex-col gap-1">

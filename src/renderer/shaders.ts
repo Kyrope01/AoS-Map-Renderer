@@ -195,6 +195,7 @@ export interface SharedShaderUniforms {
   uVolumetricStrength: { value: number };
   uCloudAltitude: { value: number };
   uShowSky: { value: number };
+  uIsOrtho: { value: number };
 }
 
 // `uSliceAxis` / `uSliceCoord` stay in the shared uniforms because the voxel
@@ -246,6 +247,7 @@ export function createSharedUniforms(): SharedShaderUniforms {
     uVolumetricStrength: { value: 0.85 },
     uCloudAltitude: { value: 0.34 },
     uShowSky: { value: 1.0 },
+    uIsOrtho: { value: 0.0 },
   };
 }
 
@@ -356,8 +358,19 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
 
   vec3 computeSceneFog(vec3 col, vec3 worldPos, float depthDist, float extraHorizonFade) {
     vec3 rayVec = worldPos - cameraPosition;
-    float rayLen = max(length(rayVec), 0.001);
-    vec3 rayDir = rayVec / rayLen;
+    vec3 rayDir;
+    float rayLen;
+    vec3 rayOrigin;
+    if (uIsOrtho > 0.5) {
+      // In orthographic projection, all camera rays are parallel to view forward (-Z_view).
+      rayDir = -normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]));
+      rayLen = max(dot(rayVec, rayDir), 0.001);
+      rayOrigin = worldPos - rayDir * rayLen;
+    } else {
+      rayLen = max(length(rayVec), 0.001);
+      rayDir = rayVec / rayLen;
+      rayOrigin = cameraPosition;
+    }
     vec3 sunDir = normalize(uLightDir);
     float cosSun = dot(rayDir, sunDir);
     float camOffset = max(0.0, length(cameraPosition) - uModelRadius * 0.85);
@@ -369,8 +382,8 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
       float tEnd = -1.0;
 
       if (abs(rayDir.y) > 0.0008) {
-        float tPlane = (cloudTop - cameraPosition.y) / rayDir.y;
-        if (cameraPosition.y > cloudTop) {
+        float tPlane = (cloudTop - rayOrigin.y) / rayDir.y;
+        if (rayOrigin.y > cloudTop) {
           if (rayDir.y < 0.0 && tPlane < rayLen) {
             tStart = max(0.0, tPlane);
             tEnd = min(rayLen, tStart + 1200.0);
@@ -379,7 +392,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
           tStart = 0.0;
           tEnd = rayDir.y > 0.0 ? min(rayLen, max(0.0, tPlane)) : min(rayLen, 1200.0);
         }
-      } else if (cameraPosition.y <= cloudTop) {
+      } else if (rayOrigin.y <= cloudTop) {
         tStart = 0.0;
         tEnd = min(rayLen, 1200.0);
       }
@@ -399,7 +412,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
 
         for (int i = 0; i < 10; i++) {
           float t = tStart + (float(i) + 0.5) * stepLen;
-          vec3 sp = cameraPosition + rayDir * t;
+          vec3 sp = rayOrigin + rayDir * t;
 
           float hNorm = clamp((sp.y + 0.5) / cloudTop, 0.0, 1.0);
           float heightEnv = 1.0 - smoothstep(0.16, 1.0, hNorm);
@@ -422,6 +435,10 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
       }
     }
 
+    float cPos = max(cosSun, 0.0);
+    float c2 = cPos * cPos;
+    float c4 = c2 * c2;
+
     // 2. Active Distance Fog (In-Game AoS linear cutoff OR Atmospheric Exp2)
     if (uFogMode == 1) {
       float fogStart = camOffset + uFogRange * 0.24;
@@ -430,7 +447,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
       float distRamp = smoothstep(camOffset + uModelRadius * 0.15, fogEnd, depthDist);
       float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * 0.65 * distRamp;
       float f = clamp(max(max(linFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * 0.12, pow(max(cosSun, 0.0), 4.0) * 0.45);
+      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * 0.12, c4 * 0.45);
       return mix(col, inGameTint, f);
     }
 
@@ -439,7 +456,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
     float distRamp = smoothstep(uModelRadius * 0.35, uModelRadius * 3.0, max(0.0, depthDist));
     float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * distRamp;
     float fogFactor = clamp(max(max(distFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * 0.10, pow(max(cosSun, 0.0), 5.0) * 0.35);
+    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * 0.10, c4 * cPos * 0.35);
     return mix(col, mieFog, fogFactor);
   }
 `;
@@ -486,7 +503,7 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
         vec3 sunDir = normalize(uLightDir);
 
         float h = clamp(dir.y, -0.2, 1.0);
-        float horizonBlend = pow(1.0 - max(h, 0.0), 2.4);
+        float horizonBlend = pow(max(0.0001, 1.0 - max(h, 0.0)), 2.4);
         vec3 baseHorizon = mix(uHorizonColor, uFogColor, 0.55);
         vec3 sky = mix(uZenithColor, baseHorizon, horizonBlend);
 
@@ -495,7 +512,7 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
         }
 
         if (uShowSky > 0.5) {
-          float sunDot = max(dot(dir, sunDir), 0.0);
+          float sunDot = max(dot(dir, sunDir), 0.0001);
           float volBoost = uVolumetricClouds > 0.5 ? (1.0 + uVolumetricStrength * 0.35) : 1.0;
           float halo = pow(sunDot, 10.0) * 0.34 * volBoost;
           float coreHalo = pow(sunDot, 120.0) * 0.85;
@@ -535,6 +552,7 @@ export interface OceanUniforms {
   uVolumetricClouds: { value: number };
   uVolumetricStrength: { value: number };
   uCloudAltitude: { value: number };
+  uIsOrtho: { value: number };
 }
 
 /**
@@ -568,6 +586,7 @@ export function createOceanMaterial(
     uVolumetricClouds: shared.uVolumetricClouds,
     uVolumetricStrength: shared.uVolumetricStrength,
     uCloudAltitude: shared.uCloudAltitude,
+    uIsOrtho: shared.uIsOrtho,
   };
 
   const material = new THREE.ShaderMaterial({
@@ -608,6 +627,7 @@ export function createOceanMaterial(
       uniform float uVolumetricClouds;
       uniform float uVolumetricStrength;
       uniform float uCloudAltitude;
+      uniform float uIsOrtho;
 
       varying vec3 vWorldPos;
       varying float vDepthDist;
@@ -639,11 +659,13 @@ export function createOceanMaterial(
         float waveAmp = uWaveStrength * mix(0.0, 0.36, shoreBlend);
         vec3 N = normalize(vec3((hC - hX) * waveAmp, 1.0, (hC - hZ) * waveAmp));
 
-        vec3 V = normalize(cameraPosition - vWorldPos);
+        vec3 V = uIsOrtho > 0.5
+          ? normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]))
+          : normalize(cameraPosition - vWorldPos);
         vec3 L = normalize(uLightDir);
         vec3 H = normalize(L + V);
 
-        float fresnel = pow(1.0 - max(dot(N, V), 0.0), 3.5);
+        float fresnel = pow(max(0.0001, 1.0 - max(dot(N, V), 0.0)), 3.5);
         float ndl = max(dot(N, L), 0.0);
         float wrap = max(0.0, (dot(N, L) + 0.18) / 1.18);
 
@@ -656,7 +678,7 @@ export function createOceanMaterial(
         float reflWeight = clamp(fresnel * 0.58 * shoreBlend, 0.0, 0.72);
         vec3 col = mix(waterLit, skyRefl, reflWeight);
 
-        float spec = pow(max(dot(N, H), 0.0), mix(160.0, 44.0, uWaveStrength)) * (0.25 + uWaveStrength * 0.55) * shoreBlend;
+        float spec = pow(max(dot(N, H), 0.0001), mix(160.0, 44.0, uWaveStrength)) * (0.25 + uWaveStrength * 0.55) * shoreBlend;
         col += uLightColor * spec * uLightIntensity * 0.5;
 
         float horizonFade = smoothstep(700.0, 3400.0, vDepthDist) * 0.94;
@@ -691,9 +713,11 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     if (uSliceAxis == 2 && min(worldEntry.y, worldExit.y) > uSliceCoord) return false;
     if (uSliceAxis == 3 && min(worldEntry.z, worldExit.z) > uSliceCoord) return false;
     float index = (cell.y * uVoxelGridSize.z + cell.z) * uVoxelShadowAtlas.z + floor(cell.x / 8.0);
-    vec2 uv = (vec2(mod(index, uVoxelShadowAtlas.x), floor(index / uVoxelShadowAtlas.x)) + 0.5) / uVoxelShadowAtlas.xy;
+    float rowY = floor((index + 0.1) / uVoxelShadowAtlas.x);
+    float colX = floor(index - rowY * uVoxelShadowAtlas.x + 0.1);
+    vec2 uv = (vec2(colX, rowY) + 0.5) / uVoxelShadowAtlas.xy;
     float packed = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
-    return mod(floor(packed / exp2(mod(cell.x, 8.0))), 2.0) >= 1.0;
+    return mod(floor((packed + 0.01) / exp2(mod(cell.x, 8.0))), 2.0) >= 1.0;
   }
 
   // Exact voxel-grid traversal. Light range is at most 120 voxels, so 384
@@ -728,27 +752,43 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     return 1.0;
   }
 
+  vec3 evalVoxelLight(int idx, vec3 worldPos, vec3 worldNormal, vec3 albedo, out vec3 lightPosOut) {
+    float row = (float(idx) + 0.5) / float(${MAX_VOXEL_LIGHTS});
+    vec4 positionRange = texture2D(uVoxelLightTexture, vec2(0.25, row));
+    lightPosOut = positionRange.xyz;
+    vec3 delta = positionRange.xyz - worldPos;
+    float distanceSquared = dot(delta, delta);
+    if (distanceSquared >= positionRange.w * positionRange.w) return vec3(0.0);
+    vec4 colorIntensity = texture2D(uVoxelLightTexture, vec2(0.75, row));
+    float distanceToLight = sqrt(distanceSquared);
+    float ratio = distanceToLight / positionRange.w;
+    float r2 = ratio * ratio;
+    float oneMinusR4 = max(0.0, 1.0 - r2 * r2);
+    float falloff = oneMinusR4 * oneMinusR4;
+    float diffuse = max(0.0, dot(worldNormal, delta / max(distanceToLight, 0.001)));
+    if (diffuse <= 0.0 || colorIntensity.a <= 0.0) return vec3(0.0);
+    float contrib = diffuse * falloff * colorIntensity.a / (1.0 + distanceSquared * 0.06);
+    if (contrib < 0.004) return vec3(0.0);
+    return albedo * colorIntensity.rgb * contrib;
+  }
+
+  // Separate shadow-casting (0..16) and unshadowed (16..512) loops keep the GPU
+  // shader compiler from hoisting the 384-step DDA register state across all 512 slots.
   vec3 voxelLightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
     vec3 result = vec3(0.0);
-    for (int i = 0; i < ${MAX_VOXEL_LIGHTS}; i++) {
+    vec3 lightPos;
+    int shadowCount = min(uVoxelLightCount, uShadowCasterCount);
+    for (int i = 0; i < ${MAX_VOXEL_SHADOW_CASTERS}; i++) {
+      if (i >= shadowCount) break;
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      if (dot(lit, lit) > 0.0) {
+        result += lit * voxelShadowVisibility(worldPos, worldNormal, lightPos);
+      }
+    }
+    for (int i = ${MAX_VOXEL_SHADOW_CASTERS}; i < ${MAX_VOXEL_LIGHTS}; i++) {
       if (i >= uVoxelLightCount) break;
-      float row = (float(i) + 0.5) / float(${MAX_VOXEL_LIGHTS});
-      vec4 positionRange = texture2D(uVoxelLightTexture, vec2(0.25, row));
-      vec3 delta = positionRange.xyz - worldPos;
-      float distanceSquared = dot(delta, delta);
-      if (distanceSquared >= positionRange.w * positionRange.w) continue;
-      vec4 colorIntensity = texture2D(uVoxelLightTexture, vec2(0.75, row));
-      float distanceToLight = sqrt(distanceSquared);
-      float ratio = distanceToLight / positionRange.w;
-      float falloff = pow(max(0.0, 1.0 - ratio * ratio * ratio * ratio), 2.0);
-      float diffuse = max(0.0, dot(worldNormal, delta / max(distanceToLight, 0.001)));
-      if (diffuse <= 0.0 || colorIntensity.a <= 0.0) continue;
-      float contrib = diffuse * falloff * colorIntensity.a / (1.0 + distanceSquared * 0.06);
-      if (contrib < 0.004) continue;
-      float visibility = i < uShadowCasterCount
-        ? voxelShadowVisibility(worldPos, worldNormal, positionRange.xyz)
-        : 1.0;
-      result += albedo * colorIntensity.rgb * contrib * visibility;
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      result += lit;
     }
     return result;
   }
@@ -799,6 +839,7 @@ export function createPbrVoxelMaterial(
     shader.uniforms.uVolumetricClouds = shared.uVolumetricClouds;
     shader.uniforms.uVolumetricStrength = shared.uVolumetricStrength;
     shader.uniforms.uCloudAltitude = shared.uCloudAltitude;
+    shader.uniforms.uIsOrtho = shared.uIsOrtho;
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -847,6 +888,7 @@ export function createPbrVoxelMaterial(
         uniform float uVolumetricClouds;
         uniform float uVolumetricStrength;
         uniform float uCloudAltitude;
+        uniform float uIsOrtho;
         varying float vAo;
         varying vec3 vVoxelLocalPos;
         varying vec3 vVoxelWorldPos;
@@ -865,7 +907,7 @@ export function createPbrVoxelMaterial(
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-        float aoFactor = mix(1.0, clamp(vAo, 0.0, 1.0), uAoStrength);
+        float aoFactor = max(0.0, mix(1.0, clamp(vAo, 0.0, 1.0), clamp(uAoStrength, 0.0, 1.5)));
         diffuseColor.rgb *= aoFactor;
         if (uOutlineStrength > 0.001) {
           vec3 vDir = normalize(vViewPosition);
@@ -956,6 +998,7 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
   uniform float uVolumetricClouds;
   uniform float uVolumetricStrength;
   uniform float uCloudAltitude;
+  uniform float uIsOrtho;
 
   varying vec3 vColor;
   varying float vAo;
@@ -987,11 +1030,14 @@ function makeStylizedShader(
         #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
-        vec3 V = normalize(cameraPosition - vWorldPos);
+        vec3 V = uIsOrtho > 0.5
+          ? normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]))
+          : normalize(cameraPosition - vWorldPos);
         vec3 VN = normalize(vViewNormal);
         vec3 VV = normalize(vViewPos);
 
-        float ao = mix(1.0, vAo, clamp(uAoStrength * 1.1, 0.0, 1.5));
+        float aoVal = clamp(vAo, 0.0, 1.0);
+        float ao = max(0.0, mix(1.0, aoVal, clamp(uAoStrength * 1.1, 0.0, 1.5)));
 
         float ndl = max(0.0, dot(N, L));
         float wrap = max(0.0, (dot(N, L) + 0.18) / 1.18);
@@ -1003,8 +1049,8 @@ function makeStylizedShader(
         vec3 col = shadowed + sunlit * ao;
 
         vec3 H = normalize(L + V);
-        float spec = pow(max(0.0, dot(N, H)), mix(64.0, 10.0, uRoughness)) * (1.0 - uRoughness) * 0.28;
-        float fresnel = pow(1.0 - max(0.0, dot(VN, VV)), 3.5) * 0.16;
+        float spec = pow(max(0.0001, dot(N, H)), mix(64.0, 10.0, uRoughness)) * (1.0 - uRoughness) * 0.28;
+        float fresnel = pow(max(0.0001, 1.0 - max(0.0, dot(VN, VV))), 3.5) * 0.16;
         col += uLightColor * spec + mix(uHorizonColor, uSkyColor, 0.5) * fresnel * ao;
 
         if (uOutlineStrength > 0.001) {
@@ -1026,7 +1072,8 @@ function makeStylizedShader(
         vec3 VN = normalize(vViewNormal);
         vec3 VV = normalize(vViewPos);
 
-        float ao = pow(mix(1.0, vAo, clamp(uAoStrength * 1.15, 0.0, 1.5)), 1.15);
+        float aoVal = clamp(vAo, 0.0, 1.0);
+        float ao = pow(max(0.001, mix(1.0, aoVal, clamp(uAoStrength * 1.15, 0.0, 1.5))), 1.15);
 
         float lum = dot(vColor, vec3(0.299, 0.587, 0.114));
         vec3 vibrant = mix(vec3(lum), vColor, 1.18);
@@ -1054,11 +1101,14 @@ function makeStylizedShader(
         #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
-        vec3 V = normalize(cameraPosition - vWorldPos);
+        vec3 V = uIsOrtho > 0.5
+          ? normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]))
+          : normalize(cameraPosition - vWorldPos);
         vec3 VN = normalize(vViewNormal);
         vec3 VV = normalize(vViewPos);
 
-        float ao = mix(1.0, vAo, clamp(uAoStrength * 1.2, 0.0, 1.5));
+        float aoVal = clamp(vAo, 0.0, 1.0);
+        float ao = max(0.0, mix(1.0, aoVal, clamp(uAoStrength * 1.2, 0.0, 1.5)));
 
         float ndl = max(0.0, dot(N, L));
         vec3 warmSun = mix(uLightColor, vec3(1.0, 0.74, 0.44), 0.42) * ndl * uLightIntensity * 1.12;
@@ -1067,8 +1117,8 @@ function makeStylizedShader(
         vec3 col = vColor * (warmSun + tealShadow) * ao;
 
         vec3 H = normalize(L + V);
-        float spec = pow(max(0.0, dot(N, H)), mix(48.0, 10.0, uRoughness)) * (1.0 - uRoughness) * 0.35;
-        float rim = pow(1.0 - max(0.0, dot(VN, VV)), 3.0);
+        float spec = pow(max(0.0001, dot(N, H)), mix(48.0, 10.0, uRoughness)) * (1.0 - uRoughness) * 0.35;
+        float rim = pow(max(0.0001, 1.0 - max(0.0, dot(VN, VV))), 3.0);
         col += warmSun * spec * 0.6 + mix(vec3(0.22, 0.55, 0.68), uLightColor, ndl) * rim * 0.25;
 
         if (uOutlineStrength > 0.001) {
@@ -1087,7 +1137,8 @@ function makeStylizedShader(
         #include <clipping_planes_fragment>
         vec3 N = normalize(vWorldNormal);
         vec3 L = normalize(uLightDir);
-        float ao = mix(1.0, vAo, uAoStrength * 0.9);
+        float aoVal = clamp(vAo, 0.0, 1.0);
+        float ao = max(0.0, mix(1.0, aoVal, clamp(uAoStrength * 0.9, 0.0, 1.5)));
 
         float faceShade = 1.0;
         if (N.y > 0.5) faceShade = 1.0;
@@ -1121,13 +1172,14 @@ function makeStylizedShader(
         vec3 VN = normalize(vViewNormal);
         vec3 V = normalize(vViewPos);
 
-        float ao = mix(1.0, vAo, uAoStrength * 1.15);
+        float aoVal = clamp(vAo, 0.0, 1.0);
+        float ao = max(0.0, mix(1.0, aoVal, clamp(uAoStrength * 1.15, 0.0, 1.5)));
 
         float ndl = max(0.0, dot(N, L));
         vec3 warmKey = uLightColor * ndl * uLightIntensity;
         vec3 coolShadow = mix(vec3(0.10, 0.16, 0.28), uSkyColor * 0.22, 0.4) * (1.0 - ndl * 0.5);
 
-        float fresnel = pow(1.0 - max(0.0, dot(VN, V)), 2.6);
+        float fresnel = pow(max(0.0001, 1.0 - max(0.0, dot(VN, V))), 2.6);
         vec3 rimColor = mix(vec3(0.28, 0.68, 1.0), uLightColor, step(0.0, dot(N, L)));
 
         vec3 col = vColor * (warmKey + coolShadow) * ao + rimColor * fresnel * 0.85;

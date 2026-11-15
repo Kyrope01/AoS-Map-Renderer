@@ -4,8 +4,11 @@ import {
   buildPivotCenteredPartData,
   computePlayerPoseTransforms,
   createSpawnedPlayer,
+  disposePlayerModelGeometryCache,
   duplicateSpawnedPlayer,
   getBasePlayerPartGrid,
+  getPlayerPartGeometry,
+  prunePlayerModelGeometryCache,
   recolorKv6SentinelGrid,
   selectPlayerPartKeys,
   snapPlayerYToGround,
@@ -176,4 +179,25 @@ test('computeFloatingPanelCoords keeps generous clearance from player and flips 
   // Near right sidebar (screenX = 950 -> 950 + 76 + 264 = 1290 > 1112): flips left of player
   const rightSidePos = computeFloatingPanelCoords(950, 420, PLAYER_PANEL_W, 424, PLAYER_PANEL_GAP, 1440, 900, 328);
   assert.equal(rightSidePos.left, 950 - PLAYER_PANEL_W - PLAYER_PANEL_GAP);
+});
+
+test('prunePlayerModelGeometryCache evicts unused geometries without disposing active ones', () => {
+  disposePlayerModelGeometryCache();
+  const activeGeo = getPlayerPartGeometry('classic_head', '#112233');
+  const unusedGeo1 = getPlayerPartGeometry('classic_head', '#223344');
+  const unusedGeo2 = getPlayerPartGeometry('classic_head', '#334455');
+  assert.notEqual(activeGeo, unusedGeo1);
+  assert.notEqual(unusedGeo1, unusedGeo2);
+
+  let activeDisposed = false;
+  activeGeo.addEventListener('dispose', () => {
+    activeDisposed = true;
+  });
+
+  const evicted = prunePlayerModelGeometryCache(new Set([activeGeo]), 1);
+  assert.equal(evicted, 2);
+  assert.equal(activeDisposed, false, 'active geometry must stay intact when cache is pruned');
+  // Active geometry stays cached and reused
+  assert.equal(getPlayerPartGeometry('classic_head', '#112233'), activeGeo);
+  disposePlayerModelGeometryCache();
 });

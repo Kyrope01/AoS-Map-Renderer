@@ -22,21 +22,38 @@ export function buildVoxelShadowData(grid: VoxelGrid, maxTextureSize: number): V
     throw new Error('This model is too large for voxel-light shadows on this device. Lights will be unshadowed.');
   }
   const data = new Uint8Array(width * height);
+  const depthStride = grid.depth * stride;
   const set = (x: number, y: number, z: number) => {
-    data[(y * grid.depth + z) * stride + Math.floor(x / 8)] |= 1 << (x % 8);
+    data[y * depthStride + z * stride + (x >> 3)] |= 1 << (x & 7);
   };
   if (grid instanceof VxlGrid) {
     // VXL already stores vertical occupancy in two bitmasks per column.
-    for (let z = 0; z < grid.depth; z++) {
-      for (let x = 0; x < grid.width; x++) {
-        const col = z * grid.width + x;
-        for (let half = 0; half < 2; half++) {
-          let bits = (half === 0 ? grid.solidLo[col] : grid.solidHi[col]) >>> 0;
-          while (bits) {
-            const y = half * 32 + (31 - Math.clz32(bits & -bits));
-            if (y < grid.height) set(x, y, z);
-            bits = (bits & (bits - 1)) >>> 0;
-          }
+    const w = grid.width;
+    const d = grid.depth;
+    const h = grid.height;
+    const solidLo = grid.solidLo;
+    const solidHi = grid.solidHi;
+    for (let z = 0; z < d; z++) {
+      const colRow = z * w;
+      const zOff = z * stride;
+      for (let x = 0; x < w; x++) {
+        const col = colRow + x;
+        const lo = solidLo[col] >>> 0;
+        const hi = solidHi[col] >>> 0;
+        if (lo === 0 && hi === 0) continue;
+        const xOff = zOff + (x >> 3);
+        const bitMask = 1 << (x & 7);
+        let bits = lo;
+        while (bits !== 0) {
+          const y = 31 - Math.clz32(bits & -bits);
+          if (y < h) data[y * depthStride + xOff] |= bitMask;
+          bits &= bits - 1;
+        }
+        bits = hi;
+        while (bits !== 0) {
+          const y = 32 + (31 - Math.clz32(bits & -bits));
+          if (y < h) data[y * depthStride + xOff] |= bitMask;
+          bits &= bits - 1;
         }
       }
     }

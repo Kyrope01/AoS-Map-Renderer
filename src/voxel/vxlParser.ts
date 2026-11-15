@@ -18,6 +18,14 @@ function dirtColorAt(x: number, y: number, z: number): number {
   return (0xff << 24) | (r << 16) | (g << 8) | b;
 }
 
+function popcount32(x: number): number {
+  let v = x | 0;
+  v = v - ((v >>> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  v = (v + (v >>> 4)) & 0x0f0f0f0f;
+  return (Math.imul(v, 0x01010101) >>> 24) & 0x3f;
+}
+
 export interface SerializedVxlGrid {
   format: 'vxl';
   width: number;
@@ -288,7 +296,6 @@ export function parseVxl(
             const gy = hMinus1 - z;
             if (gy < 32) colLo |= 1 << gy;
             else colHi |= 1 << (gy - 32);
-            voxelCount++;
           }
           for (let i = 0; i < bLen; i++) {
             const z = bStart + i;
@@ -299,7 +306,6 @@ export function parseVxl(
             surfGy[surfLen] = gy;
             surfColor[surfLen] = pendingBottomBuf[i];
             surfLen++;
-            voxelCount++;
           }
           pendingBottomLen = 0;
         }
@@ -343,7 +349,6 @@ export function parseVxl(
           surfGy[surfLen] = gy;
           surfColor[surfLen] = (0xff << 24) | (r << 16) | (g << 8) | b;
           surfLen++;
-          voxelCount++;
         }
 
         if (numChunks === 0) {
@@ -352,7 +357,6 @@ export function parseVxl(
             const gy = hMinus1 - z;
             if (gy < 32) colLo |= 1 << gy;
             else colHi |= 1 << (gy - 32);
-            voxelCount++;
           }
           break;
         }
@@ -385,6 +389,7 @@ export function parseVxl(
 
       solidLo[colIdx] = colLo;
       solidHi[colIdx] = colHi;
+      voxelCount += popcount32(colLo) + popcount32(colHi);
       const count = surfLen - colStart[colIdx];
       colCount[colIdx] = count > 255 ? 255 : count;
     }
@@ -462,7 +467,42 @@ export function encodeVxl(
   height: number,
   getVoxel: (gx: number, gy: number, gz: number) => number,
 ): Uint8Array {
-  const out: number[] = [];
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(depth) ||
+    !Number.isInteger(height) ||
+    width <= 0 ||
+    depth <= 0 ||
+    height <= 0 ||
+    height > 64 ||
+    width > AOS_VXL_MAX_DIMENSION ||
+    depth > AOS_VXL_MAX_DIMENSION
+  ) {
+    throw new VoxelParseError(
+      `Invalid .vxl dimensions ${width}×${depth}×${height}: width and depth must be 1..${AOS_VXL_MAX_DIMENSION}, height 1..64.`,
+    );
+  }
+
+  let cap = Math.max(1024, width * depth * 12);
+  let out = new Uint8Array(cap);
+  let outLen = 0;
+
+  const ensureSpace = (needed: number) => {
+    if (outLen + needed <= cap) return;
+    while (outLen + needed > cap) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(out.subarray(0, outLen));
+    out = next;
+  };
+
+  const push4 = (b0: number, b1: number, b2: number, b3: number) => {
+    ensureSpace(4);
+    out[outLen] = b0;
+    out[outLen + 1] = b1;
+    out[outLen + 2] = b2;
+    out[outLen + 3] = b3;
+    outLen += 4;
+  };
 
   const isSolidAt = (gx: number, aosZ: number, gz: number): boolean => {
     if (aosZ < 0 || aosZ >= height) return false;
@@ -488,7 +528,7 @@ export function encodeVxl(
     const r = (c >>> 16) & 0xff;
     const g = (c >>> 8) & 0xff;
     const b = c & 0xff;
-    out.push(b, g, r, 0x7f);
+    push4(b, g, r, 0x7f);
   };
 
   for (let gz = 0; gz < depth; gz++) {
@@ -503,7 +543,7 @@ export function encodeVxl(
           // reads back as a zero-length final span, so no phantom bottom voxel
           // is invented. `airStart` still carries the position that the parser
           // needs to place a pending overhang bottom color run.
-          out.push(0, height, height - 1, airStart);
+          push4(0, height, height - 1, airStart);
           break;
         }
         const topStart = z;
@@ -513,7 +553,7 @@ export function encodeVxl(
         while (z < height && isSolidAt(gx, z, gz)) z++;
 
         if (z === height) {
-          out.push(0, topStart, topEnd, airStart);
+          push4(0, topStart, topEnd, airStart);
           for (let tz = topStart; tz <= topEnd; tz++) {
             pushColor(gx, tz, gz);
           }
@@ -528,7 +568,7 @@ export function encodeVxl(
         const lenBot = z - botStart;
         const numChunks = 1 + lenTop + lenBot;
 
-        out.push(numChunks, topStart, topEnd, airStart);
+        push4(numChunks, topStart, topEnd, airStart);
         for (let tz = topStart; tz <= topEnd; tz++) {
           pushColor(gx, tz, gz);
         }
@@ -539,5 +579,5 @@ export function encodeVxl(
     }
   }
 
-  return new Uint8Array(out);
+  return out.slice(0, outLen);
 }

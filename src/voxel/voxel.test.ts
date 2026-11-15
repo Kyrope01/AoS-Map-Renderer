@@ -417,3 +417,76 @@ test('kv6 and vxl serialize/hydrate cleanly for worker transfer alongside mesh a
   assert.equal(vxlHydrated.surfGy.byteOffset, 0);
   assert.equal(vxlHydrated.surfColor.byteOffset, 0);
 });
+
+test('empty kv6 produces finite non-empty boundingBox and zero triangles cleanly', () => {
+  const emptyKv6 = encodeKv6(4, 4, 4, []);
+  const grid = parseKv6(emptyKv6);
+  assert.equal(grid.voxelCount, 0);
+
+  const built = buildVoxelGeometry(grid);
+  assert.equal(built.quadCount, 0);
+  assert.equal(built.triangleCount, 0);
+  assert.ok(built.geometry.boundingBox && !built.geometry.boundingBox.isEmpty());
+  assert.ok(Number.isFinite(built.geometry.boundingBox.min.x));
+  assert.ok(Number.isFinite(built.geometry.boundingBox.max.y));
+  assert.ok(built.geometry.boundingSphere && Number.isFinite(built.geometry.boundingSphere.radius));
+  built.geometry.dispose();
+});
+
+test('greedy mesher handles out-of-range or inverted RegionBounds without throwing', () => {
+  const buf = encodeKv6(4, 4, 4, [{ x: 1, y: 1, z: 1, r: 200, g: 50, b: 50 }]);
+  const grid = parseKv6(buf);
+
+  const emptyRegion = buildVoxelGeometryData(grid, {
+    minX: 3, maxX: 1, minY: 0, maxY: 4, minZ: 0, maxZ: 4,
+  });
+  assert.equal(emptyRegion.quadCount, 0);
+
+  const outOfRange = buildVoxelGeometryData(grid, {
+    minX: 10, maxX: 20, minY: 0, maxY: 4, minZ: 0, maxZ: 4,
+  });
+  assert.equal(outOfRange.quadCount, 0);
+});
+
+test('vxl parser deduplicates overlapping column spans in voxelCount', () => {
+  // Overlapping chunk spans: chunk 1 claims top z=1..3 (3 voxels, no bottom run),
+  // final chunk claims top z=2..4 (3 voxels, plus solid base down to z=7). Overlap at z=2,3.
+  const col = new Uint8Array([
+    4, 1, 3, 0,
+    10, 20, 30, 0x7f,
+    10, 20, 30, 0x7f,
+    10, 20, 30, 0x7f,
+    0, 2, 4, 2,
+    40, 50, 60, 0x7f,
+    40, 50, 60, 0x7f,
+    40, 50, 60, 0x7f,
+  ]);
+  const grid = parseVxl(col, { width: 1, depth: 1, height: 8 });
+  let manual = 0;
+  for (let y = 0; y < 8; y++) if (grid.isSolid(0, y, 0)) manual++;
+  assert.equal(manual, 7); // z=1..7 -> 7 unique solid voxels despite 3 + 6 = 9 written
+  assert.equal(grid.voxelCount, manual);
+});
+
+test('kv6 and vxl parsers never crash with non-VoxelParseError on arbitrary binary fuzz', () => {
+  let seed = 0x13579bdf;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed;
+  };
+  for (let i = 0; i < 300; i++) {
+    const len = 1 + (rnd() % 128);
+    const buf = new Uint8Array(len);
+    for (let j = 0; j < len; j++) buf[j] = rnd() & 0xff;
+    try {
+      parseKv6(buf);
+    } catch (e) {
+      assert.ok(e instanceof VoxelParseError, `parseKv6 fuzz threw unexpected error: ${String(e)}`);
+    }
+    try {
+      parseVxl(buf, { width: 2, depth: 2, height: 8 });
+    } catch (e) {
+      assert.ok(e instanceof VoxelParseError, `parseVxl fuzz threw unexpected error: ${String(e)}`);
+    }
+  }
+});

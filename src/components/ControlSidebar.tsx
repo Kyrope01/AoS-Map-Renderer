@@ -85,7 +85,7 @@ function SliderControl({
   displayValue,
   onChange,
 }: SliderControlProps) {
-  const pct = ((value - min) / (max - min)) * 100;
+  const pct = max > min ? Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100)) : 0;
   const trackBg = `linear-gradient(to right, #E05A2B ${pct}%, rgba(255,255,255,0.15) ${pct}%)`;
 
   return (
@@ -290,11 +290,13 @@ function InlineColorPicker({
       <div className="space-y-1.5 pt-1 border-t border-white/6">
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center justify-between text-[9px] text-[#8F98A6]">
-            <span>Hue</span>
+            <label htmlFor={`${id}-hue`}>Hue</label>
             <span className="font-mono-tabular">{hueDeg}°</span>
           </div>
           <input
+            id={`${id}-hue`}
             type="range"
+            aria-label={`${label} hue`}
             min={0}
             max={360}
             step={1}
@@ -306,11 +308,13 @@ function InlineColorPicker({
         </div>
         <div className="flex flex-col gap-0.5">
           <div className="flex items-center justify-between text-[9px] text-[#8F98A6]">
-            <span>Lightness</span>
+            <label htmlFor={`${id}-lightness`}>Lightness</label>
             <span className="font-mono-tabular">{lightnessPct}%</span>
           </div>
           <input
+            id={`${id}-lightness`}
             type="range"
+            aria-label={`${label} lightness`}
             min={0}
             max={100}
             step={1}

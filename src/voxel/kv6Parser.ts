@@ -28,12 +28,13 @@ function lookupIndexed(
   key: number,
 ): number {
   let slot = Math.imul(key ^ (key >>> 16), 0x45d9f3b) & mask;
-  while (true) {
+  for (let probe = 0; probe <= mask; probe++) {
     const k = keys[slot];
     if (k === key) return vals[slot];
     if (k === 0) return 0;
     slot = (slot + 1) & mask;
   }
+  return 0;
 }
 
 export interface SerializedKv6Grid {
@@ -124,19 +125,44 @@ export class Kv6Grid implements VoxelGrid {
   }
 
   forEachSolid(cb: (x: number, y: number, z: number, color: number) => void, bounds?: RegionBounds): void {
-    const visit = (index: number, color: number) => {
-      const x = index % this.width;
-      const row = Math.floor(index / this.width);
-      const z = row % this.depth;
-      const y = Math.floor(row / this.depth);
-      if (!bounds || (x >= bounds.minX && x < bounds.maxX && y >= bounds.minY && y < bounds.maxY && z >= bounds.minZ && z < bounds.maxZ)) cb(x, y, z, color);
-    };
+    const minX = Math.max(0, bounds?.minX ?? 0);
+    const maxX = Math.max(minX, Math.min(this.width, bounds?.maxX ?? this.width));
+    const minY = Math.max(0, bounds?.minY ?? 0);
+    const maxY = Math.max(minY, Math.min(this.height, bounds?.maxY ?? this.height));
+    const minZ = Math.max(0, bounds?.minZ ?? 0);
+    const maxZ = Math.max(minZ, Math.min(this.depth, bounds?.maxZ ?? this.depth));
+
     if (this.dense) {
-      for (let i = 0; i < this.dense.length; i++) if (this.dense[i]) visit(i, this.dense[i]);
-    } else {
-      for (let i = 0; i < this.sparseKeys!.length; i++) {
-        const key = this.sparseKeys![i];
-        if (key !== 0) visit(key - 1, this.sparseVals![i]);
+      const dense = this.dense;
+      const w = this.width;
+      const d = this.depth;
+      for (let y = minY; y < maxY; y++) {
+        const yBase = y * d;
+        for (let z = minZ; z < maxZ; z++) {
+          const rowBase = (yBase + z) * w;
+          for (let x = minX; x < maxX; x++) {
+            const color = dense[rowBase + x];
+            if (color !== 0) cb(x, y, z, color);
+          }
+        }
+      }
+      return;
+    }
+
+    const keys = this.sparseKeys!;
+    const vals = this.sparseVals!;
+    const w = this.width;
+    const d = this.depth;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (key === 0) continue;
+      const index = key - 1;
+      const x = index % w;
+      const row = Math.floor(index / w);
+      const z = row % d;
+      const y = Math.floor(row / d);
+      if (x >= minX && x < maxX && y >= minY && y < maxY && z >= minZ && z < maxZ) {
+        cb(x, y, z, vals[i]);
       }
     }
   }
@@ -250,29 +276,36 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): Kv6Grid {
   } else {
     // Never allocate more than the voxel payload justifies (guards against a
     // corrupt numvoxs making the table grow by 1 GB+ before the column table
-    // validation below rejects the file).
+    // validation below rejects the file). Use multiplication rather than `<<= 1`
+    // so large counts can never wrap signed 32-bit `cap` negative.
     const wanted = Math.min(numvoxs, maxVoxelsForSize);
+    const targetCap = wanted * 2;
     let cap = 1024;
-    while (cap < wanted * 2) cap <<= 1;
+    while (cap < targetCap && cap < 0x40000000) cap *= 2;
     sparseKeys = new Uint32Array(cap);
     sparseVals = new Uint32Array(cap);
     sparseMask = cap - 1;
   }
 
-  /** @param key stored key (`flatIndex + 1`); `0` is reserved as the empty marker. */
-  const insertSparse = (key: number, val: number) => {
+  /** @param key stored key (`flatIndex + 1`); `0` is reserved as the empty marker. Returns true when inserting a new voxel. */
+  const insertSparse = (key: number, val: number): boolean => {
     const keys = sparseKeys!;
     const vals = sparseVals!;
     let slot = Math.imul(key ^ (key >>> 16), 0x45d9f3b) & sparseMask;
-    while (true) {
+    for (let probe = 0; probe <= sparseMask; probe++) {
       const k = keys[slot];
-      if (k === 0 || k === key) {
+      if (k === 0) {
         keys[slot] = key;
         vals[slot] = val;
-        return;
+        return true;
+      }
+      if (k === key) {
+        vals[slot] = val;
+        return false;
       }
       slot = (slot + 1) & sparseMask;
     }
+    throw new VoxelParseError('Sparse .kv6 hash table capacity exceeded.');
   };
 
   let voxCursor = 0;
@@ -303,12 +336,10 @@ export function parseKv6(buffer: ArrayBuffer | Uint8Array): Kv6Grid {
             if (dense[idx] === 0) placedVoxels++;
             dense[idx] = packed;
           } else {
-            // `idx + 1` never wraps: the parser rejects volumes >= 2^32 below.
-            const key = idx + 1;
-            if (lookupIndexed(sparseKeys!, sparseVals!, sparseMask, key) === 0) {
+            // `idx + 1` never wraps: the parser rejects volumes >= 2^32 above.
+            if (insertSparse(idx + 1, packed)) {
               placedVoxels++;
             }
-            insertSparse(key, packed);
           }
         }
       }
@@ -343,6 +374,16 @@ export function encodeKv6(
   voxels: Kv6VoxelInput[],
   pivot?: [number, number, number],
 ): Uint8Array {
+  if (
+    !Number.isInteger(xsiz) ||
+    !Number.isInteger(ysiz) ||
+    !Number.isInteger(zsiz) ||
+    xsiz <= 0 ||
+    ysiz <= 0 ||
+    zsiz <= 0
+  ) {
+    throw new VoxelParseError(`Invalid .kv6 dimensions for encoding: ${xsiz}×${ysiz}×${zsiz}.`);
+  }
   // Deduplicate and sort by (x, y, z) ascending as required by Voxlap .kv6
   const dedup = new Map<number, Kv6VoxelInput>();
   for (const v of voxels) {

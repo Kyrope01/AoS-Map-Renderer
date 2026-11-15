@@ -13,6 +13,7 @@ import {
   computePlayerPoseTransforms,
   disposePlayerModelGeometryCache,
   getPlayerPartGeometry,
+  prunePlayerModelGeometryCache,
   selectPlayerPartKeys,
 } from '../voxel/playerModel';
 import {
@@ -196,12 +197,24 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
     const [contextLost, setContextLost] = useState(false);
     const [isDraggingFile, setIsDraggingFile] = useState(false);
 
+    useEffect(() => {
+      if (!isDraggingFile) return;
+      const clearDrag = () => setIsDraggingFile(false);
+      window.addEventListener('dragend', clearDrag);
+      window.addEventListener('drop', clearDrag);
+      return () => {
+        window.removeEventListener('dragend', clearDrag);
+        window.removeEventListener('drop', clearDrag);
+      };
+    }, [isDraggingFile]);
+
     const engineRef = useRef<{
       applyPreset: (preset: CameraPreset, instant?: boolean) => void;
       syncMesh: (meshData: BuiltVoxelMesh | null, instantCamera?: boolean) => void;
       syncSettings: () => void;
       syncVoxelLights: () => void;
       syncPlayers: () => void;
+      syncPlayerHelpers: () => void;
       syncVoxelGrid: (grid: VoxelGrid | null) => void;
       getDisplayResolution: () => { width: number; height: number };
       getMaxTextureSize: () => number;
@@ -310,6 +323,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const roomEnvironment = new RoomEnvironment();
       const envTex = pmrem.fromScene(roomEnvironment, 0.04).texture;
       scene.environment = envTex;
+      roomEnvironment.dispose();
       pmrem.dispose();
 
       // Cameras (far plane 12000 for procedural sky dome and infinite ocean horizon)
@@ -591,15 +605,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
 
       // Hover highlight box (shown while picking a voxel)
+      const hoverSourceGeo = new THREE.BoxGeometry(1.04, 1.04, 1.04);
       const hoverBox = new THREE.LineSegments(
-        new THREE.EdgesGeometry(new THREE.BoxGeometry(1.04, 1.04, 1.04)),
+        new THREE.EdgesGeometry(hoverSourceGeo),
         new THREE.LineBasicMaterial({ color: '#E05A2B', toneMapped: false }),
       );
+      hoverSourceGeo.dispose();
       hoverBox.visible = false;
       hoverBox.frustumCulled = false;
       scene.add(hoverBox);
 
-      // --- Spawned Player Models (Special Effects, .vxl maps only) --------
+      // --- Spawned Player Models (Miscellaneous, .vxl maps only) --------
       const playersGroup = new THREE.Group();
       playersGroup.name = 'spawned-player-models';
       scene.add(playersGroup);
@@ -638,127 +654,32 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       playerPlacementRing.renderOrder = 5;
       playerHelperGroup.add(playerPlacementRing);
 
-      const syncPlayers = () => {
-        const players = spawnedPlayersRef.current;
-        const activeMat = materials[settingsRef.current.shaderMode];
+      interface RenderedPlayerRecord {
+        root: THREE.Group;
+        headMesh: THREE.Mesh;
+        torsoMesh: THREE.Mesh;
+        legLeftMesh: THREE.Mesh;
+        legRightMesh: THREE.Mesh;
+        armsPivot: THREE.Group;
+        armsMesh: THREE.Mesh;
+        toolMesh: THREE.Mesh;
+        poseSig: string;
+        geoSig: string;
+        x: number;
+        y: number;
+        z: number;
+        yaw: number;
+        pitch: number;
+      }
+      const renderedPlayers = new Map<string, RenderedPlayerRecord>();
+
+      const syncPlayerHelpers = () => {
         const isVxl = builtMeshRef.current?.format === 'vxl';
-
-        // Rebuild child groups cleanly from cached geometries (BufferGeometry stays cached).
-        while (playersGroup.children.length > 0) {
-          playersGroup.remove(playersGroup.children[0]);
-        }
-
-        if (!isVxl || players.length === 0) {
-          playerSelectionRing.visible = false;
-          if (!placingPlayerRef.current && !movingPlayerIdRef.current) {
-            playerPlacementRing.visible = false;
-          }
-          renderer.shadowMap.needsUpdate = true;
-          requestRender();
-          return;
-        }
-
-        const assignPlayerPartMesh = (
-          geo: THREE.BufferGeometry,
-          playerId: string,
-          pos: [number, number, number],
-          rotX: number,
-          rotY: number,
-          scale: number,
-        ): THREE.Mesh => {
-          const mesh = new THREE.Mesh(geo, activeMat);
-          mesh.castShadow = !isSoftwareGl;
-          mesh.receiveShadow = !isSoftwareGl;
-          mesh.position.set(pos[0], pos[1], pos[2]);
-          mesh.rotation.set(rotX, rotY, 0, 'YXZ');
-          mesh.scale.setScalar(scale);
-          mesh.userData.playerId = playerId;
-          return mesh;
-        };
-
-        let selectedPlayer: SpawnedPlayer | null = null;
-        for (const p of players) {
-          if (p.id === selectedPlayerIdRef.current) {
-            selectedPlayer = p;
-          }
-          const root = new THREE.Group();
-          root.name = `player-${p.id}`;
-          root.userData.playerId = p.id;
-          root.position.set(p.x, p.y, p.z);
-          root.rotation.set(0, -THREE.MathUtils.degToRad(p.yaw), 0);
-
-          const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
-          const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
-
-          const legLeftMesh = assignPlayerPartMesh(
-            getPlayerPartGeometry(parts.legLeft, p.teamColor),
-            p.id,
-            pose.legLeft.position,
-            pose.legLeft.rotationX,
-            pose.legLeft.rotationY,
-            pose.legLeft.scale,
-          );
-          const legRightMesh = assignPlayerPartMesh(
-            getPlayerPartGeometry(parts.legRight, p.teamColor),
-            p.id,
-            pose.legRight.position,
-            pose.legRight.rotationX,
-            pose.legRight.rotationY,
-            pose.legRight.scale,
-          );
-          const torsoMesh = assignPlayerPartMesh(
-            getPlayerPartGeometry(parts.torso, p.teamColor),
-            p.id,
-            pose.torso.position,
-            pose.torso.rotationX,
-            pose.torso.rotationY,
-            pose.torso.scale,
-          );
-          const headMesh = assignPlayerPartMesh(
-            getPlayerPartGeometry(parts.head, p.teamColor),
-            p.id,
-            pose.head.position,
-            pose.head.rotationX,
-            pose.head.rotationY,
-            pose.head.scale,
-          );
-
-          // Arms + held weapon/tool share the arms shoulder pivot so aiming/sprinting moves both together.
-          const armsPivot = new THREE.Group();
-          armsPivot.position.set(
-            pose.arms.position[0],
-            pose.arms.position[1],
-            pose.arms.position[2],
-          );
-          armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
-          armsPivot.userData.playerId = p.id;
-
-          const armsMesh = assignPlayerPartMesh(
-            getPlayerPartGeometry(parts.arms, p.teamColor),
-            p.id,
-            [0, 0, 0],
-            0,
-            pose.arms.rotationY,
-            pose.arms.scale,
-          );
-          const toolGeo =
-            p.weapon === 'block'
-              ? getPlayerPartGeometry(parts.tool, p.blockColor)
-              : getPlayerPartGeometry(parts.tool);
-          const toolMesh = assignPlayerPartMesh(
-            toolGeo,
-            p.id,
-            pose.toolInArms.position,
-            pose.toolInArms.rotationX,
-            pose.toolInArms.rotationY,
-            pose.toolInArms.scale,
-          );
-          armsPivot.add(armsMesh, toolMesh);
-
-          root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot);
-          playersGroup.add(root);
-        }
-
+        const selectedId = selectedPlayerIdRef.current;
+        const selectedPlayer =
+          isVxl && selectedId
+            ? spawnedPlayersRef.current.find((p) => p.id === selectedId) ?? null
+            : null;
         if (selectedPlayer) {
           playerSelectionRing.position.set(
             selectedPlayer.x,
@@ -770,12 +691,230 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           playerSelectionRing.visible = false;
         }
 
-        if (!placingPlayerRef.current && !movingPlayerIdRef.current) {
+        if (!isVxl || (!placingPlayerRef.current && !movingPlayerIdRef.current)) {
           playerPlacementRing.visible = false;
         }
-
-        renderer.shadowMap.needsUpdate = true;
         requestRender();
+      };
+
+      const makePlayerPartMesh = (
+        geo: THREE.BufferGeometry,
+        playerId: string,
+        mat: THREE.Material,
+        pos: [number, number, number],
+        rotX: number,
+        rotY: number,
+        scale: number,
+      ): THREE.Mesh => {
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.castShadow = !isSoftwareGl;
+        mesh.receiveShadow = !isSoftwareGl;
+        mesh.position.set(pos[0], pos[1], pos[2]);
+        mesh.rotation.set(rotX, rotY, 0, 'YXZ');
+        mesh.scale.setScalar(scale);
+        mesh.userData.playerId = playerId;
+        return mesh;
+      };
+
+      const syncPlayers = () => {
+        const players = spawnedPlayersRef.current;
+        const activeMat = materials[settingsRef.current.shaderMode];
+        const isVxl = builtMeshRef.current?.format === 'vxl';
+
+        if (!isVxl || players.length === 0) {
+          const hadAny = renderedPlayers.size > 0;
+          if (hadAny) {
+            for (const rec of renderedPlayers.values()) {
+              playersGroup.remove(rec.root);
+            }
+            renderedPlayers.clear();
+            prunePlayerModelGeometryCache(new Set());
+            renderer.shadowMap.needsUpdate = true;
+          }
+          syncPlayerHelpers();
+          return;
+        }
+
+        let geometryOrTransformChanged = false;
+        const activeIds = new Set<string>();
+        const activeGeos = new Set<THREE.BufferGeometry>();
+
+        for (const p of players) {
+          activeIds.add(p.id);
+          const geoSig = `${p.style}|${p.stance}|${p.teamColor}|${p.weapon === 'block' ? p.blockColor : p.weapon}`;
+          const poseSig = `${p.stance}|${p.weapon}|${p.pitch}`;
+          let rec = renderedPlayers.get(p.id);
+
+          if (!rec) {
+            const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
+            const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+            const root = new THREE.Group();
+            root.name = `player-${p.id}`;
+            root.userData.playerId = p.id;
+            root.position.set(p.x, p.y, p.z);
+            root.rotation.set(0, -THREE.MathUtils.degToRad(p.yaw), 0);
+
+            const legLeftMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.legLeft, p.teamColor),
+              p.id,
+              activeMat,
+              pose.legLeft.position,
+              pose.legLeft.rotationX,
+              pose.legLeft.rotationY,
+              pose.legLeft.scale,
+            );
+            const legRightMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.legRight, p.teamColor),
+              p.id,
+              activeMat,
+              pose.legRight.position,
+              pose.legRight.rotationX,
+              pose.legRight.rotationY,
+              pose.legRight.scale,
+            );
+            const torsoMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.torso, p.teamColor),
+              p.id,
+              activeMat,
+              pose.torso.position,
+              pose.torso.rotationX,
+              pose.torso.rotationY,
+              pose.torso.scale,
+            );
+            const headMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.head, p.teamColor),
+              p.id,
+              activeMat,
+              pose.head.position,
+              pose.head.rotationX,
+              pose.head.rotationY,
+              pose.head.scale,
+            );
+
+            // Arms + held weapon/tool share the arms shoulder pivot so aiming/sprinting moves both together.
+            const armsPivot = new THREE.Group();
+            armsPivot.position.set(pose.arms.position[0], pose.arms.position[1], pose.arms.position[2]);
+            armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
+            armsPivot.userData.playerId = p.id;
+
+            const armsMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.arms, p.teamColor),
+              p.id,
+              activeMat,
+              [0, 0, 0],
+              0,
+              pose.arms.rotationY,
+              pose.arms.scale,
+            );
+            const toolGeo =
+              p.weapon === 'block'
+                ? getPlayerPartGeometry(parts.tool, p.blockColor)
+                : getPlayerPartGeometry(parts.tool);
+            const toolMesh = makePlayerPartMesh(
+              toolGeo,
+              p.id,
+              activeMat,
+              pose.toolInArms.position,
+              pose.toolInArms.rotationX,
+              pose.toolInArms.rotationY,
+              pose.toolInArms.scale,
+            );
+            armsPivot.add(armsMesh, toolMesh);
+            root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot);
+            playersGroup.add(root);
+
+            rec = {
+              root,
+              headMesh,
+              torsoMesh,
+              legLeftMesh,
+              legRightMesh,
+              armsPivot,
+              armsMesh,
+              toolMesh,
+              poseSig,
+              geoSig,
+              x: p.x,
+              y: p.y,
+              z: p.z,
+              yaw: p.yaw,
+              pitch: p.pitch,
+            };
+            renderedPlayers.set(p.id, rec);
+            geometryOrTransformChanged = true;
+          } else {
+            if (rec.x !== p.x || rec.y !== p.y || rec.z !== p.z) {
+              rec.root.position.set(p.x, p.y, p.z);
+              rec.x = p.x;
+              rec.y = p.y;
+              rec.z = p.z;
+              geometryOrTransformChanged = true;
+            }
+            if (rec.yaw !== p.yaw) {
+              rec.root.rotation.set(0, -THREE.MathUtils.degToRad(p.yaw), 0);
+              rec.yaw = p.yaw;
+              geometryOrTransformChanged = true;
+            }
+            if (rec.geoSig !== geoSig) {
+              const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
+              rec.legLeftMesh.geometry = getPlayerPartGeometry(parts.legLeft, p.teamColor);
+              rec.legRightMesh.geometry = getPlayerPartGeometry(parts.legRight, p.teamColor);
+              rec.torsoMesh.geometry = getPlayerPartGeometry(parts.torso, p.teamColor);
+              rec.headMesh.geometry = getPlayerPartGeometry(parts.head, p.teamColor);
+              rec.armsMesh.geometry = getPlayerPartGeometry(parts.arms, p.teamColor);
+              rec.toolMesh.geometry =
+                p.weapon === 'block'
+                  ? getPlayerPartGeometry(parts.tool, p.blockColor)
+                  : getPlayerPartGeometry(parts.tool);
+              rec.geoSig = geoSig;
+              geometryOrTransformChanged = true;
+            }
+            if (rec.poseSig !== poseSig) {
+              const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+              rec.legLeftMesh.position.set(...pose.legLeft.position);
+              rec.legLeftMesh.rotation.set(pose.legLeft.rotationX, pose.legLeft.rotationY, 0, 'YXZ');
+              rec.legRightMesh.position.set(...pose.legRight.position);
+              rec.legRightMesh.rotation.set(pose.legRight.rotationX, pose.legRight.rotationY, 0, 'YXZ');
+              rec.torsoMesh.position.set(...pose.torso.position);
+              rec.headMesh.position.set(...pose.head.position);
+              rec.headMesh.rotation.set(pose.head.rotationX, pose.head.rotationY, 0, 'YXZ');
+              rec.armsPivot.position.set(...pose.arms.position);
+              rec.armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
+              rec.toolMesh.position.set(...pose.toolInArms.position);
+              rec.toolMesh.scale.setScalar(pose.toolInArms.scale);
+              rec.poseSig = poseSig;
+              rec.pitch = p.pitch;
+              geometryOrTransformChanged = true;
+            }
+            rec.legLeftMesh.material = activeMat;
+            rec.legRightMesh.material = activeMat;
+            rec.torsoMesh.material = activeMat;
+            rec.headMesh.material = activeMat;
+            rec.armsMesh.material = activeMat;
+            rec.toolMesh.material = activeMat;
+          }
+
+          activeGeos.add(rec.legLeftMesh.geometry);
+          activeGeos.add(rec.legRightMesh.geometry);
+          activeGeos.add(rec.torsoMesh.geometry);
+          activeGeos.add(rec.headMesh.geometry);
+          activeGeos.add(rec.armsMesh.geometry);
+          activeGeos.add(rec.toolMesh.geometry);
+        }
+
+        for (const [id, rec] of renderedPlayers.entries()) {
+          if (!activeIds.has(id)) {
+            playersGroup.remove(rec.root);
+            renderedPlayers.delete(id);
+            geometryOrTransformChanged = true;
+          }
+        }
+
+        prunePlayerModelGeometryCache(activeGeos);
+        if (geometryOrTransformChanged) {
+          renderer.shadowMap.needsUpdate = true;
+        }
+        syncPlayerHelpers();
       };
 
       const raycaster = new THREE.Raycaster();
@@ -837,13 +976,19 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
 
       const updateHoverAt = (clientX: number, clientY: number) => {
-        if (!pickingModeRef.current || !voxelMesh.visible) {
+        const wasVisible = hoverBox.visible;
+        const hideHover = () => {
           hoverBox.visible = false;
+          if (wasVisible) requestRender();
+        };
+
+        if (!pickingModeRef.current || !voxelMesh.visible) {
+          hideHover();
           return;
         }
         const rect = renderer.domElement.getBoundingClientRect();
         if (rect.width < 1 || rect.height < 1) {
-          hoverBox.visible = false;
+          hideHover();
           return;
         }
         pointerNdc.set(
@@ -853,7 +998,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         raycaster.setFromCamera(pointerNdc, activeCamera);
         const hit = firstVisibleHit();
         if (!hit) {
-          hoverBox.visible = false;
+          hideHover();
           return;
         }
         hitPoint.copy(hit.point);
@@ -869,13 +1014,16 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           vy >= Math.round(gridSize.y) ||
           vz >= Math.round(gridSize.z)
         ) {
-          hoverBox.visible = false;
+          hideHover();
           return;
         }
-        hoverVoxel.set(vx, vy, vz);
-        voxelToWorld(vx, vy, vz, hoverBox.position);
-        hoverBox.visible = true;
-        requestRender();
+        const changed = !wasVisible || hoverVoxel.x !== vx || hoverVoxel.y !== vy || hoverVoxel.z !== vz;
+        if (changed) {
+          hoverVoxel.set(vx, vy, vz);
+          voxelToWorld(vx, vy, vz, hoverBox.position);
+          hoverBox.visible = true;
+          requestRender();
+        }
       };
 
       const projectedScratch = new THREE.Vector3();
@@ -969,6 +1117,18 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       const applyPreset = (preset: CameraPreset, instant = false) => {
         computeCameraForPreset(preset);
+        if (activeCamera === orthoCamera) {
+          const dist = camTargetPos.distanceTo(camTargetLook);
+          const halfH = Math.max(4, dist * Math.tan(THREE.MathUtils.degToRad(perspCamera.fov * 0.5)));
+          const curAspect = (container.clientWidth || 1) / Math.max(1, container.clientHeight || 1);
+          orthoCamera.left = -halfH * curAspect;
+          orthoCamera.right = halfH * curAspect;
+          orthoCamera.top = halfH;
+          orthoCamera.bottom = -halfH;
+          orthoCamera.zoom = 1;
+          savedOrthoZoom = 1;
+          orthoCamera.updateProjectionMatrix();
+        }
         if (instant || settingsRef.current.cameraMode === 'free') {
           activeCamera.position.copy(camTargetPos);
           activeCamera.lookAt(camTargetLook);
@@ -1464,7 +1624,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
         if (pickingModeRef.current) {
           updateHoverAt(e.clientX, e.clientY);
-          requestRender();
           return;
         }
 
@@ -1708,6 +1867,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           controls.object = activeCamera;
           if (renderPass) renderPass.camera = activeCamera;
         }
+        sharedUniforms.uIsOrtho.value = activeCamera === orthoCamera ? 1.0 : 0.0;
 
         if (bloomPass) {
           bloomPass.enabled = s.bloomStrength > 0.005;
@@ -1742,12 +1902,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         gridSize.copy(meshData.size);
         gridOffset.set(meshData.size.x * 0.5, 0, meshData.size.z * 0.5);
 
-        if (meshData.geometry.boundingBox) {
-          modelBounds.copy(meshData.geometry.boundingBox);
-        }
         const sx = meshData.size.x;
         const sy = meshData.size.y;
         const sz = meshData.size.z;
+        if (meshData.geometry.boundingBox && !meshData.geometry.boundingBox.isEmpty()) {
+          modelBounds.copy(meshData.geometry.boundingBox);
+        } else {
+          modelBounds.set(
+            new THREE.Vector3(-sx * 0.5, 0, -sz * 0.5),
+            new THREE.Vector3(sx * 0.5, Math.max(1, sy), sz * 0.5),
+          );
+        }
         modelRadius = Math.max(6, Math.hypot(sx, sy, sz) * 0.5);
         modelCenterY = sy * 0.5;
 
@@ -1988,6 +2153,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         syncSettings,
         syncVoxelLights,
         syncPlayers,
+        syncPlayerHelpers,
         syncVoxelGrid,
         getDisplayResolution,
         getMaxTextureSize: () => renderer.capabilities.maxTextureSize || 4096,
@@ -2131,7 +2297,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         studioPass?.dispose();
         renderPass?.dispose();
         if (composer) composer.dispose();
-        roomEnvironment.dispose();
         renderer.dispose();
         if (renderer.domElement.parentNode === container) {
           container.removeChild(renderer.domElement);
@@ -2165,7 +2330,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
     useEffect(() => {
       engineRef.current?.syncPlayers();
-    }, [spawnedPlayers, selectedPlayerId, placingPlayer, movingPlayerId]);
+    }, [spawnedPlayers, builtMesh]);
+
+    useEffect(() => {
+      engineRef.current?.syncPlayerHelpers();
+    }, [selectedPlayerId, placingPlayer, movingPlayerId]);
 
     const isCrosshairMode = pickingMode || placingPlayer || movingPlayerId !== null;
 
@@ -2177,7 +2346,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           setIsDraggingFile(true);
         }}
         onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setIsDraggingFile(false);
+          const next = e.relatedTarget as Node | null;
+          if (!next || !e.currentTarget.contains(next)) {
+            setIsDraggingFile(false);
+          }
         }}
         onDrop={(e) => {
           e.preventDefault();

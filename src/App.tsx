@@ -115,8 +115,11 @@ export default function App() {
   const sidebarCollapsedRef = useRef(sidebarCollapsed);
   sidebarCollapsedRef.current = sidebarCollapsed;
 
+  const workerCancelRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     return () => {
+      workerCancelRef.current?.();
       workerRef.current?.terminate();
       workerRef.current = null;
     };
@@ -143,6 +146,9 @@ export default function App() {
   }, []);
 
   const handleVoxelPicked = useCallback((x: number, y: number, z: number, normal: [number, number, number]) => {
+    setSelectedPlayerId(null);
+    setMovingPlayerId(null);
+    setPlacingPlayer(false);
     const existing = voxelLights.find((light) => light.x === x && light.y === y && light.z === z);
     if (existing) {
       setSelectedLightId(existing.id);
@@ -282,37 +288,44 @@ export default function App() {
 
     const requestId = ++loadRequestIdRef.current;
     setLoadingFile(file.name);
+    let worker: Worker | null = null;
 
     try {
       const arrayBuffer = await file.arrayBuffer();
       if (loadRequestIdRef.current !== requestId) return;
 
-      // Terminate any stale in-flight worker so rapid successive drops do not
-      // compete for CPU cores before finishing cleanly on the latest file.
+      // Cancel & terminate any stale in-flight worker so rapid successive drops
+      // immediately settle superseded promises without starving CPU cores.
+      workerCancelRef.current?.();
+      workerCancelRef.current = null;
       if (workerRef.current) {
         workerRef.current.terminate();
         workerRef.current = null;
       }
 
-      const worker = new VoxelWorker();
-      workerRef.current = worker;
+      const activeWorker = new VoxelWorker();
+      worker = activeWorker;
+      workerRef.current = activeWorker;
 
       const maxTextureSize = viewportRef.current?.getMaxTextureSize() ?? 4096;
 
-      const response = await new Promise<VoxelWorkerResponse>((resolve, reject) => {
-        worker.onmessage = (e: MessageEvent<VoxelWorkerResponse>) => {
+      const response = await new Promise<VoxelWorkerResponse | null>((resolve, reject) => {
+        workerCancelRef.current = () => resolve(null);
+        activeWorker.onmessage = (e: MessageEvent<VoxelWorkerResponse>) => {
+          workerCancelRef.current = null;
           resolve(e.data);
         };
-        worker.onerror = (e: ErrorEvent) => {
+        activeWorker.onerror = (e: ErrorEvent) => {
+          workerCancelRef.current = null;
           reject(new Error(e.message || 'Background voxel loader failed.'));
         };
-        worker.postMessage(
+        activeWorker.postMessage(
           { id: requestId, format, buffer: arrayBuffer, maxTextureSize },
           [arrayBuffer],
         );
       });
 
-      if (loadRequestIdRef.current !== requestId) return;
+      if (!response || loadRequestIdRef.current !== requestId) return;
 
       if (!response.ok) {
         if (response.isParseError) {
@@ -365,6 +378,13 @@ export default function App() {
           : `Could not read "${file.name}". Make sure it is a valid uncompressed .kv6 or 512×512×64 Ace of Spades .vxl binary.`,
       );
     } finally {
+      if (worker) {
+        worker.terminate();
+        if (workerRef.current === worker) {
+          workerRef.current = null;
+          workerCancelRef.current = null;
+        }
+      }
       if (loadRequestIdRef.current === requestId) {
         setLoadingFile(null);
       }
