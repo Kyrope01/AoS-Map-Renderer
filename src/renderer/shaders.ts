@@ -5,6 +5,7 @@ import {
   RenderSettings,
   ShaderCategory,
   ShaderMode,
+  MAX_VOXEL_LIGHTS,
 } from '../voxel/types';
 
 export interface BackdropTheme {
@@ -159,6 +160,13 @@ export const SHADER_PRESETS: ShaderPresetMeta[] = [
 
 export interface SharedShaderUniforms {
   uTime: { value: number };
+  uVoxelLightCount: { value: number };
+  uVoxelLightTexture: { value: THREE.DataTexture };
+  uVoxelShadowTexture: { value: THREE.DataTexture };
+  uVoxelShadowAtlas: { value: THREE.Vector3 }; // atlas width, height, X-byte stride
+  uVoxelGridSize: { value: THREE.Vector3 };
+  uVoxelGridOffset: { value: THREE.Vector3 };
+  uVoxelShadowsEnabled: { value: number };
   uAoStrength: { value: number };
   uOutlineStrength: { value: number };
   uRoughness: { value: number };
@@ -187,8 +195,24 @@ export interface SharedShaderUniforms {
 }
 
 export function createSharedUniforms(): SharedShaderUniforms {
+  // Two RGBA float texels per light: world position/range and linear color/intensity.
+  // Unlike uniform arrays, this does not consume fragment-uniform slots per light.
+  const lightTexture = new THREE.DataTexture(
+    new Float32Array(MAX_VOXEL_LIGHTS * 8), 2, MAX_VOXEL_LIGHTS,
+    THREE.RGBAFormat, THREE.FloatType,
+  );
+  lightTexture.magFilter = THREE.NearestFilter;
+  lightTexture.minFilter = THREE.NearestFilter;
+  lightTexture.needsUpdate = true;
   return {
     uTime: { value: 0 },
+    uVoxelLightCount: { value: 0 },
+    uVoxelLightTexture: { value: lightTexture },
+    uVoxelShadowTexture: { value: new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.RedFormat) },
+    uVoxelShadowAtlas: { value: new THREE.Vector3(1, 1, 1) },
+    uVoxelGridSize: { value: new THREE.Vector3(0, 0, 0) },
+    uVoxelGridOffset: { value: new THREE.Vector3() },
+    uVoxelShadowsEnabled: { value: 0 },
     uAoStrength: { value: 0.9 },
     uOutlineStrength: { value: 0.0 },
     uRoughness: { value: 0.55 },
@@ -640,6 +664,84 @@ export function createOceanMaterial(
   return { material, uniforms };
 }
 
+// Shared by every voxel shader, including PBR. Data is in world space and
+// sampled at texel centers; the early break keeps small setups inexpensive.
+const VOXEL_LIGHT_GLSL = /* glsl */ `
+  uniform int uVoxelLightCount;
+  uniform sampler2D uVoxelLightTexture;
+  uniform sampler2D uVoxelShadowTexture;
+  uniform vec3 uVoxelShadowAtlas;
+  uniform vec3 uVoxelGridSize;
+  uniform vec3 uVoxelGridOffset;
+  uniform int uVoxelShadowsEnabled;
+
+  bool voxelShadowSolid(vec3 cell, vec3 worldEntry, vec3 worldExit) {
+    if (any(lessThan(cell, vec3(0.0))) || any(greaterThanEqual(cell, uVoxelGridSize))) return false;
+    // Ignore removed portions when the section-slice control is active.
+    if (uSliceAxis == 1 && min(worldEntry.x, worldExit.x) > uSliceCoord) return false;
+    if (uSliceAxis == 2 && min(worldEntry.y, worldExit.y) > uSliceCoord) return false;
+    if (uSliceAxis == 3 && min(worldEntry.z, worldExit.z) > uSliceCoord) return false;
+    float index = (cell.y * uVoxelGridSize.z + cell.z) * uVoxelShadowAtlas.z + floor(cell.x / 8.0);
+    vec2 uv = (vec2(mod(index, uVoxelShadowAtlas.x), floor(index / uVoxelShadowAtlas.x)) + 0.5) / uVoxelShadowAtlas.xy;
+    float packed = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
+    return mod(floor(packed / exp2(mod(cell.x, 8.0))), 2.0) >= 1.0;
+  }
+
+  // Exact voxel-grid traversal. Light range is at most 120 voxels, so 384
+  // cell crossings cover even a diagonal ray at the maximum range.
+  float voxelShadowVisibility(vec3 worldPos, vec3 worldNormal, vec3 lightPos) {
+    if (uVoxelShadowsEnabled == 0) return 1.0;
+    vec3 origin = worldPos + worldNormal * 0.025;
+    vec3 ray = lightPos - origin;
+    float rayLength = length(ray);
+    if (rayLength < 0.001) return 1.0;
+    vec3 dir = ray / rayLength;
+    vec3 pos = origin + uVoxelGridOffset;
+    vec3 cell = floor(pos);
+    vec3 stepDir = sign(dir);
+    vec3 delta = 1.0 / max(abs(dir), vec3(0.000001));
+    vec3 side = (stepDir * (cell - pos) + stepDir * 0.5 + 0.5) * delta;
+    float travel = 0.0;
+    for (int stepIndex = 0; stepIndex < 384; stepIndex++) {
+      if (travel >= rayLength - 0.001) break;
+      vec3 entry = origin + dir * (travel + 0.0001);
+      float exitDistance = min(rayLength, min(side.x, min(side.y, side.z)));
+      vec3 exitPoint = origin + dir * exitDistance;
+      if (voxelShadowSolid(cell, entry, exitPoint)) return 0.0;
+      if (side.x <= side.y && side.x <= side.z) {
+        travel = side.x; side.x += delta.x; cell.x += stepDir.x;
+      } else if (side.y <= side.z) {
+        travel = side.y; side.y += delta.y; cell.y += stepDir.y;
+      } else {
+        travel = side.z; side.z += delta.z; cell.z += stepDir.z;
+      }
+    }
+    return 1.0;
+  }
+
+  vec3 voxelLightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
+    vec3 result = vec3(0.0);
+    for (int i = 0; i < ${MAX_VOXEL_LIGHTS}; i++) {
+      if (i >= uVoxelLightCount) break;
+      float row = (float(i) + 0.5) / float(${MAX_VOXEL_LIGHTS});
+      vec4 positionRange = texture2D(uVoxelLightTexture, vec2(0.25, row));
+      vec3 delta = positionRange.xyz - worldPos;
+      float distanceSquared = dot(delta, delta);
+      if (distanceSquared >= positionRange.w * positionRange.w) continue;
+      vec4 colorIntensity = texture2D(uVoxelLightTexture, vec2(0.75, row));
+      float distanceToLight = sqrt(distanceSquared);
+      float ratio = distanceToLight / positionRange.w;
+      float falloff = pow(max(0.0, 1.0 - ratio * ratio * ratio * ratio), 2.0);
+      float diffuse = max(0.0, dot(worldNormal, delta / max(distanceToLight, 0.001)));
+      if (diffuse <= 0.0 || colorIntensity.a <= 0.0) continue;
+      float visibility = voxelShadowVisibility(worldPos, worldNormal, positionRange.xyz);
+      result += albedo * colorIntensity.rgb * colorIntensity.a *
+        diffuse * falloff * visibility / (1.0 + distanceSquared * 0.06);
+    }
+    return result;
+  }
+`;
+
 /**
  * Creates the Studio PBR material extended via onBeforeCompile to support
  * Voxel AO, section slicing, optional silhouette outlines, and unified fog.
@@ -658,6 +760,13 @@ export function createPbrVoxelMaterial(
 
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = shared.uTime;
+    shader.uniforms.uVoxelLightCount = shared.uVoxelLightCount;
+    shader.uniforms.uVoxelLightTexture = shared.uVoxelLightTexture;
+    shader.uniforms.uVoxelShadowTexture = shared.uVoxelShadowTexture;
+    shader.uniforms.uVoxelShadowAtlas = shared.uVoxelShadowAtlas;
+    shader.uniforms.uVoxelGridSize = shared.uVoxelGridSize;
+    shader.uniforms.uVoxelGridOffset = shared.uVoxelGridOffset;
+    shader.uniforms.uVoxelShadowsEnabled = shared.uVoxelShadowsEnabled;
     shader.uniforms.uAoStrength = shared.uAoStrength;
     shader.uniforms.uOutlineStrength = shared.uOutlineStrength;
     shader.uniforms.uModelRadius = shared.uModelRadius;
@@ -730,7 +839,8 @@ export function createPbrVoxelMaterial(
         varying vec3 vVoxelWorldPos;
         varying float vVoxelDepth;
         varying vec3 vCustomViewNormal;
-        ${FOG_AND_VOLUMETRIC_GLSL}`,
+        ${FOG_AND_VOLUMETRIC_GLSL}
+        ${VOXEL_LIGHT_GLSL}`,
       )
       .replace(
         '#include <clipping_planes_fragment>',
@@ -752,12 +862,18 @@ export function createPbrVoxelMaterial(
         }`,
       )
       .replace(
+        '#include <opaque_fragment>',
+        `outgoingLight += voxelLightContribution(vVoxelWorldPos,
+          normalize(inverseTransformDirection(normalize(vCustomViewNormal), viewMatrix)), diffuseColor.rgb);
+        #include <opaque_fragment>`,
+      )
+      .replace(
         '#include <fog_fragment>',
         `gl_FragColor.rgb = computeSceneFog(gl_FragColor.rgb, vVoxelWorldPos, max(0.0, vVoxelDepth), 0.0);`,
       );
   };
 
-  mat.customProgramCacheKey = () => 'voxatelier-pbr-v5';
+  mat.customProgramCacheKey = () => 'voxatelier-pbr-v7-voxel-shadows';
   return mat;
 }
 
@@ -835,6 +951,8 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
 
   ${FOG_AND_VOLUMETRIC_GLSL}
 
+  ${VOXEL_LIGHT_GLSL}
+
   vec3 applyFog(vec3 col) {
     return computeSceneFog(col, vWorldPos, max(0.0, vDepthDist), 0.0);
   }
@@ -877,7 +995,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.04, 0.05, 0.07), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.82);
         }
 
-        gl_FragColor = vec4(applyFog(col), 1.0);
+        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -908,7 +1026,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col), 1.0);
+        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -941,7 +1059,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.02, 0.03, 0.04), smoothstep(0.66, 0.88, sil) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col), 1.0);
+        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -971,7 +1089,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.02, 0.02, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col), 1.0);
+        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -997,7 +1115,7 @@ function makeStylizedShader(
 
         vec3 col = vColor * (warmKey + coolShadow) * ao + rimColor * fresnel * 0.85;
 
-        gl_FragColor = vec4(applyFog(col), 1.0);
+        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
