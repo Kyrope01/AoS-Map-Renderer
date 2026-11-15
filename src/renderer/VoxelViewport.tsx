@@ -10,12 +10,17 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { BuiltVoxelMesh } from '../voxel/mesher';
 import {
+  canUseSinglePassExport,
   computeExportTiles,
   computeUpscaledDimensions,
 } from '../voxel/exportResolution';
 import { CameraPreset, MAX_VOXEL_LIGHTS, RenderSettings, VoxelGrid, VoxelLight } from '../voxel/types';
-import { updateVoxelLightTexture } from './voxelLightTexture';
-import { createVoxelShadowTexture } from './voxelShadows';
+import { sortVoxelLightsByIntensity, updateVoxelLightTexture } from './voxelLightTexture';
+import {
+  createVoxelShadowTexture,
+  hydrateVoxelShadowTexture,
+  VoxelShadowAtlasData,
+} from './voxelShadows';
 import {
   BACKDROP_THEMES,
   createMaterialBank,
@@ -23,7 +28,9 @@ import {
   createSharedUniforms,
   createSkyDomeMaterial,
   MaterialBank,
+  MAX_VOXEL_SHADOW_CASTERS,
   SharedShaderUniforms,
+  StudioPostShader,
   syncSharedUniforms,
 } from './shaders';
 import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
@@ -31,6 +38,7 @@ import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
   getDisplayResolution: () => { width: number; height: number };
+  getMaxTextureSize: () => number;
   exportPng: (filename: string, targetWidth?: number) => Promise<void>;
   /** Projects a voxel-grid coordinate to viewport-relative CSS pixels. */
   projectVoxelToScreen: (
@@ -40,9 +48,15 @@ export interface VoxelViewportHandle {
   ) => { x: number; y: number; visible: boolean };
 }
 
+export interface PrecomputedShadowData {
+  atlas: VoxelShadowAtlasData | null;
+  error: string | null;
+}
+
 interface VoxelViewportProps {
   builtMesh: BuiltVoxelMesh | null;
   voxelGrid: VoxelGrid | null;
+  precomputedShadow?: PrecomputedShadowData | null;
   onShadowWarning: (message: string | null) => void;
   settings: RenderSettings;
   onFileDrop: (file: File) => void;
@@ -53,83 +67,6 @@ interface VoxelViewportProps {
   pickingMode: boolean;
   onVoxelPicked: (x: number, y: number, z: number, normal: [number, number, number]) => void;
 }
-
-const StudioPostShader = {
-  uniforms: {
-    tDiffuse: { value: null },
-    uResolution: { value: new THREE.Vector2(1440, 900) },
-    uVignette: { value: 0.14 },
-    uChromatic: { value: 0.0 },
-    uPixelate: { value: 0.0 },
-    uTiltShift: { value: 0.0 },
-  },
-  vertexShader: /* glsl */ `
-    varying vec2 vUv;
-    void main() {
-      vUv = uv;
-      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-    }
-  `,
-  fragmentShader: /* glsl */ `
-    uniform sampler2D tDiffuse;
-    uniform vec2 uResolution;
-    uniform float uVignette;
-    uniform float uChromatic;
-    uniform float uPixelate;
-    uniform float uTiltShift;
-    varying vec2 vUv;
-
-    vec3 sampleScene(vec2 uv) {
-      if (uChromatic > 0.001) {
-        vec2 dir = uv - 0.5;
-        float dist = length(dir);
-        float shift = uChromatic * 0.0075 * dist;
-        return vec3(
-          texture2D(tDiffuse, uv - dir * shift).r,
-          texture2D(tDiffuse, uv).g,
-          texture2D(tDiffuse, uv + dir * shift).b
-        );
-      }
-      return texture2D(tDiffuse, uv).rgb;
-    }
-
-    void main() {
-      vec2 uv = vUv;
-      if (uPixelate > 1.5) {
-        vec2 stepSize = vec2(uPixelate) / max(uResolution, vec2(1.0));
-        uv = floor(uv / stepSize) * stepSize + stepSize * 0.5;
-      }
-
-      vec3 col = sampleScene(uv);
-
-      if (uTiltShift > 0.01) {
-        float focusBand = smoothstep(0.12, 0.48, abs(vUv.y - 0.5));
-        float blurPx = focusBand * uTiltShift * 4.5;
-        if (blurPx > 0.2) {
-          vec2 texel = blurPx / max(uResolution, vec2(1.0));
-          vec3 acc = col * 0.24;
-          acc += sampleScene(uv + vec2(texel.x, 0.0)) * 0.12;
-          acc += sampleScene(uv - vec2(texel.x, 0.0)) * 0.12;
-          acc += sampleScene(uv + vec2(0.0, texel.y)) * 0.12;
-          acc += sampleScene(uv - vec2(0.0, texel.y)) * 0.12;
-          acc += sampleScene(uv + vec2(texel.x, texel.y) * 0.7) * 0.07;
-          acc += sampleScene(uv + vec2(-texel.x, texel.y) * 0.7) * 0.07;
-          acc += sampleScene(uv + vec2(texel.x, -texel.y) * 0.7) * 0.07;
-          acc += sampleScene(uv + vec2(-texel.x, -texel.y) * 0.7) * 0.07;
-          col = acc;
-        }
-      }
-
-      if (uVignette > 0.001) {
-        float d = distance(vUv, vec2(0.5));
-        float vig = smoothstep(0.85, 0.28, d);
-        col *= mix(1.0, mix(0.45, 1.0, vig), uVignette);
-      }
-
-      gl_FragColor = vec4(col, 1.0);
-    }
-  `,
-};
 
 function createContactShadowTexture(): THREE.CanvasTexture {
   const size = 256;
@@ -167,7 +104,7 @@ const _worldUp = new THREE.Vector3(0, 1, 0);
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
   function VoxelViewport(
-    { builtMesh, voxelGrid, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, onDisableAutoRotate, voxelLights, pickingMode, onVoxelPicked },
+    { builtMesh, voxelGrid, precomputedShadow, onShadowWarning, settings, onFileDrop, onAdjustFlySpeed, onDisableAutoRotate, voxelLights, pickingMode, onVoxelPicked },
     ref,
   ) {
     const mountRef = useRef<HTMLDivElement | null>(null);
@@ -175,6 +112,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
     settingsRef.current = settings;
     const voxelGridRef = useRef(voxelGrid);
     voxelGridRef.current = voxelGrid;
+    const precomputedShadowRef = useRef(precomputedShadow);
+    precomputedShadowRef.current = precomputedShadow;
     const shadowWarningRef = useRef(onShadowWarning);
     shadowWarningRef.current = onShadowWarning;
     const builtMeshRef = useRef(builtMesh);
@@ -200,6 +139,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       syncVoxelLights: () => void;
       syncVoxelGrid: (grid: VoxelGrid | null) => void;
       getDisplayResolution: () => { width: number; height: number };
+      getMaxTextureSize: () => number;
       exportPng: (filename: string, targetWidth?: number) => Promise<void>;
       projectVoxelToScreen: (
         x: number,
@@ -218,6 +158,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           width: Math.max(1, Math.round((mountRef.current?.clientWidth || window.innerWidth) * Math.min(window.devicePixelRatio || 1, 2))),
           height: Math.max(1, Math.round((mountRef.current?.clientHeight || window.innerHeight) * Math.min(window.devicePixelRatio || 1, 2))),
         };
+      },
+      getMaxTextureSize: () => {
+        return engineRef.current?.getMaxTextureSize() ?? 4096;
       },
       exportPng: async (filename: string, targetWidth?: number) => {
         if (engineRef.current) {
@@ -396,14 +339,32 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         sharedUniforms.uVoxelShadowsEnabled.value = 0;
         if (grid) {
           try {
-            const atlas = createVoxelShadowTexture(grid, renderer.capabilities.maxTextureSize);
-            emptyTexture.dispose();
-            sharedUniforms.uVoxelShadowTexture.value = atlas.texture;
-            sharedUniforms.uVoxelShadowAtlas.value.set(atlas.width, atlas.height, atlas.stride);
-            sharedUniforms.uVoxelGridSize.value.set(grid.width, grid.height, grid.depth);
-            sharedUniforms.uVoxelGridOffset.value.set(grid.width * 0.5, 0, grid.depth * 0.5);
-            sharedUniforms.uVoxelShadowsEnabled.value = 1;
-            shadowWarningRef.current(null);
+            const pre = precomputedShadowRef.current;
+            if (pre) {
+              if (pre.atlas) {
+                const atlas = hydrateVoxelShadowTexture(pre.atlas);
+                emptyTexture.dispose();
+                sharedUniforms.uVoxelShadowTexture.value = atlas.texture;
+                sharedUniforms.uVoxelShadowAtlas.value.set(atlas.width, atlas.height, atlas.stride);
+                sharedUniforms.uVoxelGridSize.value.set(grid.width, grid.height, grid.depth);
+                sharedUniforms.uVoxelGridOffset.value.set(grid.width * 0.5, 0, grid.depth * 0.5);
+                sharedUniforms.uVoxelShadowsEnabled.value = 1;
+                shadowWarningRef.current(null);
+              } else {
+                shadowWarningRef.current(
+                  pre.error ?? 'Could not create voxel-light shadows. Lights will be unshadowed.',
+                );
+              }
+            } else {
+              const atlas = createVoxelShadowTexture(grid, renderer.capabilities.maxTextureSize);
+              emptyTexture.dispose();
+              sharedUniforms.uVoxelShadowTexture.value = atlas.texture;
+              sharedUniforms.uVoxelShadowAtlas.value.set(atlas.width, atlas.height, atlas.stride);
+              sharedUniforms.uVoxelGridSize.value.set(grid.width, grid.height, grid.depth);
+              sharedUniforms.uVoxelGridOffset.value.set(grid.width * 0.5, 0, grid.depth * 0.5);
+              sharedUniforms.uVoxelShadowsEnabled.value = 1;
+              shadowWarningRef.current(null);
+            }
           } catch (error) {
             shadowWarningRef.current(error instanceof Error ? error.message : 'Could not create voxel-light shadows. Lights will be unshadowed.');
           }
@@ -533,12 +494,16 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const markerColor = new THREE.Color();
 
       const syncVoxelLights = () => {
-        const lights = voxelLightsRef.current;
+        const sortedLights = sortVoxelLightsByIntensity(voxelLightsRef.current);
         sharedUniforms.uVoxelLightCount.value = updateVoxelLightTexture(
-          sharedUniforms.uVoxelLightTexture.value, lights, gridOffset,
+          sharedUniforms.uVoxelLightTexture.value, sortedLights, gridOffset,
         );
-        markers.count = lights.length;
-        lights.forEach((light, i) => {
+        sharedUniforms.uShadowCasterCount.value = Math.min(
+          sortedLights.length,
+          MAX_VOXEL_SHADOW_CASTERS,
+        );
+        markers.count = sortedLights.length;
+        sortedLights.forEach((light, i) => {
           voxelToWorld(light.x, light.y, light.z, markerPosition);
           const scale = light.intensity > 0.001 ? 1 : 0;
           markerMatrix.makeScale(scale, scale, scale).setPosition(markerPosition);
@@ -684,6 +649,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let renderPass: RenderPass | null = null;
       let bloomPass: UnrealBloomPass | null = null;
       let studioPass: ShaderPass | null = null;
+      let outputPass: OutputPass | null = null;
 
       if (!isSoftwareGl) {
         composer = new EffectComposer(renderer);
@@ -704,7 +670,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           Math.round(height * initialPixelRatio),
         );
         composer.addPass(studioPass);
-        composer.addPass(new OutputPass());
+        outputPass = new OutputPass();
+        composer.addPass(outputPass);
       }
 
       // Smooth camera transition targets
@@ -937,6 +904,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         }
         renderBusy = true;
         frameId = requestAnimationFrame(() => {
+          if (isExporting) {
+            renderBusy = false;
+            renderDirty = true;
+            return;
+          }
           renderDirty = false;
           const now = performance.now();
           const dt = Math.min(0.05, (now - lastTime) / 1000);
@@ -1457,14 +1429,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           try {
             // Prefer a single composer render at the requested size: it keeps
             // bloom / tilt-shift / chromatic / pixelate / vignette identical to
-            // the viewport.
-            if (composer && !isSoftwareGl && targetW <= maxTex && targetH <= maxRb) {
+            // the viewport while staying below SINGLE_PASS_MAX_PIXELS (~400 MB).
+            if (canUseSinglePassExport(targetW, targetH, maxTex, maxRb, Boolean(composer), isSoftwareGl)) {
               renderer.setPixelRatio(1);
               renderer.setSize(targetW, targetH, false);
-              composer.setPixelRatio(1);
-              composer.setSize(targetW, targetH);
+              composer!.setPixelRatio(1);
+              composer!.setSize(targetW, targetH);
               skyMesh.position.copy(activeCamera.position);
-              composer.render();
+              composer!.render();
               await downloadCanvasPng(renderer.domElement, filename);
               return;
             }
@@ -1506,9 +1478,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             // The tile path bypasses the composer, so approximate the studio pass
             // in 2D: the vignette and pixelate below mirror the shader versions
             // (applied in sRGB space rather than linear, so the curve differs very
-            // slightly at extreme sizes). Chromatic aberration is skipped here;
-            // export at a size the composer can render in one pass (most 4K/8K
-            // targets) to get it.
+            // slightly at extreme sizes). Chromatic aberration, bloom, and tilt-shift
+            // are skipped here; export at ~16 MP or below (e.g. 4K) to keep them.
             const post = settingsRef.current;
             if (post.vignette > 0.001) {
               const cx = targetW * 0.5;
@@ -1568,6 +1539,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         syncVoxelLights,
         syncVoxelGrid,
         getDisplayResolution,
+        getMaxTextureSize: () => renderer.capabilities.maxTextureSize || 4096,
         exportPng,
         projectVoxelToScreen,
       };
@@ -1694,6 +1666,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         // EffectComposer.dispose() only frees its own render targets; passes own
         // theirs (UnrealBloomPass keeps a full mip chain) and RoomEnvironment owns
         // its geometries/materials.
+        outputPass?.dispose();
         bloomPass?.dispose();
         studioPass?.dispose();
         renderPass?.dispose();

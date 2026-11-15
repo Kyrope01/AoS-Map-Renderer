@@ -1,12 +1,12 @@
-import { AlertCircle, Crosshair, Upload, X } from 'lucide-react';
+import { AlertCircle, Crosshair, Loader2, Upload, X } from 'lucide-react';
 import { ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ControlSidebar } from './components/ControlSidebar';
 import { TopBar } from './components/TopBar';
 import { VoxelLightPanel, VoxelScreenPos } from './components/VoxelLightPanel';
 import { BACKDROP_THEMES } from './renderer/shaders';
-import { VoxelViewport, VoxelViewportHandle } from './renderer/VoxelViewport';
-import { parseKv6 } from './voxel/kv6Parser';
-import { buildVoxelGeometry, BuiltVoxelMesh } from './voxel/mesher';
+import { PrecomputedShadowData, VoxelViewport, VoxelViewportHandle } from './renderer/VoxelViewport';
+import { hydrateKv6Grid } from './voxel/kv6Parser';
+import { BuiltVoxelMesh, hydrateVoxelGeometry } from './voxel/mesher';
 import {
   MAX_VOXEL_LIGHTS,
   MeshStats,
@@ -14,9 +14,10 @@ import {
   VoxelFormat,
   VoxelGrid,
   VoxelLight,
-  VoxelParseError,
 } from './voxel/types';
-import { parseVxl } from './voxel/vxlParser';
+import { hydrateVxlGrid } from './voxel/vxlParser';
+import type { VoxelWorkerResponse } from './voxel/worker';
+import VoxelWorker from './voxel/worker?worker&inline';
 
 const DEFAULT_SETTINGS: RenderSettings = {
   shaderMode: 'atmospheric',
@@ -61,16 +62,21 @@ const DEFAULT_SETTINGS: RenderSettings = {
 interface LoadedModel {
   name: string;
   grid: VoxelGrid;
-  parseMs: number;
+  builtMesh: BuiltVoxelMesh;
+  stats: MeshStats;
+  precomputedShadow: PrecomputedShadowData;
 }
 
 export default function App() {
   const viewportRef = useRef<VoxelViewportHandle | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const workerRef = useRef<Worker | null>(null);
+  const loadRequestIdRef = useRef(0);
 
   const [settings, setSettings] = useState<RenderSettings>(DEFAULT_SETTINGS);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [loadingFile, setLoadingFile] = useState<string | null>(null);
   const [loadedModel, setLoadedModel] = useState<LoadedModel | null>(null);
 
   // Special Effects: voxel lights (point lights anchored to picked voxels)
@@ -84,36 +90,15 @@ export default function App() {
     visible: false,
   });
 
-  const { builtMesh, stats } = useMemo<{
-    builtMesh: BuiltVoxelMesh | null;
-    stats: MeshStats | null;
-  }>(() => {
-    if (!loadedModel) {
-      return { builtMesh: null, stats: null };
-    }
-
-    const { grid, name, parseMs } = loadedModel;
-    const t0 = performance.now();
-    const built = buildVoxelGeometry(grid);
-    const meshMs = performance.now() - t0;
-
-    return {
-      builtMesh: built,
-      stats: {
-        name,
-        format: grid.format,
-        width: grid.width,
-        height: grid.height,
-        depth: grid.depth,
-        voxelCount: grid.voxelCount,
-        quadCount: built.quadCount,
-        triangleCount: built.triangleCount,
-        waterColorHex: built.waterColorHex,
-        parseMs,
-        meshMs,
-      },
+  useEffect(() => {
+    return () => {
+      workerRef.current?.terminate();
+      workerRef.current = null;
     };
-  }, [loadedModel]);
+  }, []);
+
+  const builtMesh = loadedModel?.builtMesh ?? null;
+  const stats = loadedModel?.stats ?? null;
 
   const updateSettings = useCallback((patch: Partial<RenderSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
@@ -185,26 +170,92 @@ export default function App() {
       return;
     }
 
+    const requestId = ++loadRequestIdRef.current;
+    setLoadingFile(file.name);
+
     try {
       const arrayBuffer = await file.arrayBuffer();
-      const t0 = performance.now();
-      const grid = format === 'kv6' ? parseKv6(arrayBuffer) : parseVxl(arrayBuffer);
-      const parseMs = performance.now() - t0;
+      if (loadRequestIdRef.current !== requestId) return;
+
+      // Terminate any stale in-flight worker so rapid successive drops do not
+      // compete for CPU cores before finishing cleanly on the latest file.
+      if (workerRef.current) {
+        workerRef.current.terminate();
+        workerRef.current = null;
+      }
+
+      const worker = new VoxelWorker();
+      workerRef.current = worker;
+
+      const maxTextureSize = viewportRef.current?.getMaxTextureSize() ?? 4096;
+
+      const response = await new Promise<VoxelWorkerResponse>((resolve, reject) => {
+        worker.onmessage = (e: MessageEvent<VoxelWorkerResponse>) => {
+          resolve(e.data);
+        };
+        worker.onerror = (e: ErrorEvent) => {
+          reject(new Error(e.message || 'Background voxel loader failed.'));
+        };
+        worker.postMessage(
+          { id: requestId, format, buffer: arrayBuffer, maxTextureSize },
+          [arrayBuffer],
+        );
+      });
+
+      if (loadRequestIdRef.current !== requestId) return;
+
+      if (!response.ok) {
+        if (response.isParseError) {
+          setErrorMsg(response.error);
+        } else {
+          setErrorMsg(
+            `Could not read "${file.name}". Make sure it is a valid uncompressed .kv6 or 512×512×64 Ace of Spades .vxl binary.`,
+          );
+        }
+        return;
+      }
+
+      const grid =
+        response.grid.format === 'kv6'
+          ? hydrateKv6Grid(response.grid)
+          : hydrateVxlGrid(response.grid);
+      const built = hydrateVoxelGeometry(response.mesh);
       const baseName = file.name.replace(/\.(kv6|vxl)$/i, '');
+
       setLoadedModel({
         name: baseName,
         grid,
-        parseMs,
+        builtMesh: built,
+        precomputedShadow: {
+          atlas: response.shadowAtlas,
+          error: response.shadowError,
+        },
+        stats: {
+          name: baseName,
+          format: grid.format,
+          width: grid.width,
+          height: grid.height,
+          depth: grid.depth,
+          voxelCount: grid.voxelCount,
+          quadCount: built.quadCount,
+          triangleCount: built.triangleCount,
+          waterColorHex: built.waterColorHex,
+          parseMs: response.parseMs,
+          meshMs: response.meshMs,
+        },
       });
       setSettings((prev) => ({ ...prev, waterColorOverride: '' }));
       clearVoxelLights();
     } catch (err) {
-      if (err instanceof VoxelParseError) {
-        setErrorMsg(err.message);
-      } else {
-        setErrorMsg(
-          `Could not read "${file.name}". Make sure it is a valid uncompressed .kv6 or 512×512×64 Ace of Spades .vxl binary.`,
-        );
+      if (loadRequestIdRef.current !== requestId) return;
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : `Could not read "${file.name}". Make sure it is a valid uncompressed .kv6 or 512×512×64 Ace of Spades .vxl binary.`,
+      );
+    } finally {
+      if (loadRequestIdRef.current === requestId) {
+        setLoadingFile(null);
       }
     }
   }, [clearVoxelLights]);
@@ -324,6 +375,7 @@ export default function App() {
         ref={viewportRef}
         builtMesh={builtMesh}
         voxelGrid={loadedModel?.grid ?? null}
+        precomputedShadow={loadedModel?.precomputedShadow ?? null}
         onShadowWarning={setShadowWarning}
         settings={settings}
         onFileDrop={(f) => void handleFileLoad(f)}
@@ -407,7 +459,7 @@ export default function App() {
       )}
 
       {/* Clean Minimal Empty Stage Prompt (when no file is imported yet) */}
-      {!loadedModel && (
+      {!loadedModel && !loadingFile && (
         <div
           className={`pointer-events-none fixed inset-0 z-10 flex items-center justify-center p-4 transition-all duration-200 ${
             sidebarCollapsed ? '' : 'sm:pr-[316px]'
@@ -429,6 +481,24 @@ export default function App() {
               <Upload className="w-3.5 h-3.5" aria-hidden="true" />
               <span>Choose .vxl / .kv6 File</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* Non-blocking Background Worker Loading Indicator */}
+      {loadingFile && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={`pointer-events-none fixed inset-0 z-20 flex items-center justify-center p-4 transition-all duration-200 ${
+            sidebarCollapsed ? '' : 'sm:pr-[316px]'
+          }`}
+        >
+          <div className="flex items-center gap-3 px-4 py-3 rounded-lg border border-white/12 bg-[#14171D]/95 text-[#F3F1EC] shadow-xl">
+            <Loader2 className="w-4 h-4 text-[#E05A2B] animate-spin shrink-0" aria-hidden="true" />
+            <span className="text-xs font-medium">
+              Parsing &amp; meshing <span className="font-mono-tabular">{loadingFile}</span>...
+            </span>
           </div>
         </div>
       )}

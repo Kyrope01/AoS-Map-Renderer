@@ -1,7 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { createMaterialBank, createSharedUniforms } from './shaders';
+import {
+  createMaterialBank,
+  createOceanMaterial,
+  createSharedUniforms,
+  createSkyDomeMaterial,
+  MAX_VOXEL_SHADOW_CASTERS,
+  StudioPostShader,
+} from './shaders';
+import { sortVoxelLightsByIntensity } from './voxelLightTexture';
+import { VoxelLight } from '../voxel/types';
 
 /** Minimal stand-in for three's private `resolveIncludes()`. */
 function resolveIncludes(source: string): string {
@@ -89,12 +98,20 @@ test('stylized voxel shaders clip through three clipping planes, not a hardcoded
 });
 
 test('shaders never use reversed smoothstep edges (spec-undefined)', () => {
+  const shared = createSharedUniforms();
+  const sky = createSkyDomeMaterial(shared);
+  const ocean = createOceanMaterial(shared);
   const sources = [
     compiledPbrFragment(),
     ...bankFragmentShaders().map((entry) => entry.fragment),
+    resolveIncludes(sky.fragmentShader),
+    resolveIncludes(ocean.material.fragmentShader),
+    StudioPostShader.fragmentShader,
   ];
+  sky.dispose();
+  ocean.material.dispose();
   for (const source of sources) {
-    for (const match of source.matchAll(/smoothstep\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,/g)) {
+    for (const match of source.matchAll(/smoothstep\(\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*,\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*,/g)) {
       const low = Number(match[1]);
       const high = Number(match[2]);
       assert.ok(
@@ -103,6 +120,7 @@ test('shaders never use reversed smoothstep edges (spec-undefined)', () => {
       );
     }
   }
+  assert.match(StudioPostShader.fragmentShader, /1\.0\s*-\s*smoothstep\(\s*0\.28\s*,\s*0\.85\s*,\s*d\s*\)/);
 });
 
 test('every voxel material opts into local clipping and shadow clipping', () => {
@@ -112,4 +130,54 @@ test('every voxel material opts into local clipping and shadow clipping', () => 
     assert.ok(Array.isArray(material.clippingPlanes));
   }
   bank.dispose();
+});
+
+test('voxel light shaders bind uShadowCasterCount, cull dim lights, and cap shadow rays', () => {
+  const shared = createSharedUniforms();
+  const bank = createMaterialBank(shared);
+  const pbrShader = {
+    uniforms: {} as Record<string, THREE.IUniform>,
+    vertexShader: THREE.ShaderLib.physical.vertexShader,
+    fragmentShader: THREE.ShaderLib.physical.fragmentShader,
+  };
+  bank.pbr.onBeforeCompile(
+    pbrShader as unknown as THREE.WebGLProgramParametersWithUniforms,
+    null as never,
+  );
+  assert.equal(pbrShader.uniforms.uShadowCasterCount, shared.uShadowCasterCount);
+  assert.equal(MAX_VOXEL_SHADOW_CASTERS, 16);
+
+  const fragments = [
+    resolveIncludes(pbrShader.fragmentShader),
+    ...bankFragmentShaders().map((entry) => entry.fragment),
+  ];
+  bank.dispose();
+  for (const frag of fragments) {
+    assert.match(frag, /uniform int uShadowCasterCount;/);
+    assert.match(frag, /contrib < 0\.004/);
+    assert.match(frag, /i < uShadowCasterCount\s*\?\s*voxelShadowVisibility\(/);
+  }
+});
+
+test('sortVoxelLightsByIntensity prioritizes brightest lights first without mutating input', () => {
+  const mk = (id: string, intensity: number): VoxelLight => ({
+    id,
+    x: 0,
+    y: 0,
+    z: 0,
+    normal: [0, 1, 0],
+    intensity,
+    range: 28,
+    color: '#FFB35C',
+  });
+  const input = [mk('dim', 0.5), mk('bright', 42), mk('mid', 6)];
+  const sorted = sortVoxelLightsByIntensity(input);
+  assert.deepEqual(
+    sorted.map((l) => l.id),
+    ['bright', 'mid', 'dim'],
+  );
+  assert.deepEqual(
+    input.map((l) => l.id),
+    ['dim', 'bright', 'mid'],
+  );
 });

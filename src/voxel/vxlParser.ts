@@ -18,6 +18,21 @@ function dirtColorAt(x: number, y: number, z: number): number {
   return (0xff << 24) | (r << 16) | (g << 8) | b;
 }
 
+export interface SerializedVxlGrid {
+  format: 'vxl';
+  width: number;
+  height: number;
+  depth: number;
+  voxelCount: number;
+  waterColor: number | null;
+  solidLo: Uint32Array;
+  solidHi: Uint32Array;
+  colStart: Uint32Array;
+  colCount: Uint8Array;
+  surfGy: Uint8Array;
+  surfColor: Uint32Array;
+}
+
 /**
  * Compact 64-bit-per-column VoxelGrid for Ace of Spades `.vxl` maps.
  * Uses two Uint32 masks per (x, z) column for O(1) solid checks and stores
@@ -37,10 +52,10 @@ export class VxlGrid implements VoxelGrid {
   /** Bitmask for gy = 32..63 */
   readonly solidHi: Uint32Array;
 
-  private readonly colStart: Uint32Array;
-  private readonly colCount: Uint8Array;
-  private readonly surfGy: Uint8Array;
-  private readonly surfColor: Uint32Array;
+  readonly colStart: Uint32Array;
+  readonly colCount: Uint8Array;
+  readonly surfGy: Uint8Array;
+  readonly surfColor: Uint32Array;
 
   constructor(
     width: number,
@@ -119,6 +134,39 @@ export class VxlGrid implements VoxelGrid {
     if (!solid) return 0;
     return this.getColorAtSolid(colIdx, x, y, z);
   }
+
+  toSerialized(): SerializedVxlGrid {
+    return {
+      format: 'vxl',
+      width: this.width,
+      height: this.height,
+      depth: this.depth,
+      voxelCount: this.voxelCount,
+      waterColor: this.waterColor,
+      solidLo: this.solidLo,
+      solidHi: this.solidHi,
+      colStart: this.colStart,
+      colCount: this.colCount,
+      surfGy: this.surfGy,
+      surfColor: this.surfColor,
+    };
+  }
+}
+
+export function hydrateVxlGrid(data: SerializedVxlGrid): VxlGrid {
+  return new VxlGrid(
+    data.width,
+    data.height,
+    data.depth,
+    data.voxelCount,
+    data.waterColor,
+    data.solidLo,
+    data.solidHi,
+    data.colStart,
+    data.colCount,
+    data.surfGy,
+    data.surfColor,
+  );
 }
 
 export interface VxlParseOptions {
@@ -399,8 +447,8 @@ export function parseVxl(
     solidHi,
     colStart,
     colCount,
-    surfGy.subarray(0, surfLen),
-    surfColor.subarray(0, surfLen),
+    surfGy.slice(0, surfLen),
+    surfColor.slice(0, surfLen),
   );
 }
 

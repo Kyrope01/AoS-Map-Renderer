@@ -12,7 +12,13 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import * as THREE from 'three';
-import { createMaterialBank, createSharedUniforms } from '../src/renderer/shaders';
+import {
+  createMaterialBank,
+  createOceanMaterial,
+  createSharedUniforms,
+  createSkyDomeMaterial,
+  StudioPostShader,
+} from '../src/renderer/shaders';
 
 const outDir = process.argv[2] ?? '/tmp/shader-out';
 mkdirSync(outDir, { recursive: true });
@@ -33,7 +39,10 @@ function define(source: string): string {
     .replace(/MAX_VOXEL_LIGHTS/g, '512');
 }
 
-const bank = createMaterialBank(createSharedUniforms());
+const shared = createSharedUniforms();
+const bank = createMaterialBank(shared);
+const skyMat = createSkyDomeMaterial(shared);
+const ocean = createOceanMaterial(shared);
 
 const pbrShader = {
   uniforms: {} as Record<string, THREE.IUniform>,
@@ -52,6 +61,9 @@ const outputs: { name: string; vertexShader: string; fragmentShader: string }[] 
   { name: 'cinema', vertexShader: bank.cinema.vertexShader, fragmentShader: bank.cinema.fragmentShader },
   { name: 'voxlap', vertexShader: bank.voxlap.vertexShader, fragmentShader: bank.voxlap.fragmentShader },
   { name: 'rim', vertexShader: bank.rim.vertexShader, fragmentShader: bank.rim.fragmentShader },
+  { name: 'sky', vertexShader: skyMat.vertexShader, fragmentShader: skyMat.fragmentShader },
+  { name: 'ocean', vertexShader: ocean.material.vertexShader, fragmentShader: ocean.material.fragmentShader },
+  { name: 'studio', vertexShader: StudioPostShader.vertexShader, fragmentShader: StudioPostShader.fragmentShader },
 ];
 
 for (const entry of outputs) {
@@ -65,5 +77,7 @@ for (const entry of outputs) {
   );
 }
 
+skyMat.dispose();
+ocean.material.dispose();
 bank.dispose();
 console.log(`wrote ${outputs.length * 2} shader files to ${outDir}`);

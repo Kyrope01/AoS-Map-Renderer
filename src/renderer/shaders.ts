@@ -158,9 +158,12 @@ export const SHADER_PRESETS: ShaderPresetMeta[] = [
   { id: 'rim', category: 'cinematic', label: 'Chiaroscuro', description: 'Warm key light & cool rim' },
 ];
 
+export const MAX_VOXEL_SHADOW_CASTERS = 16;
+
 export interface SharedShaderUniforms {
   uTime: { value: number };
   uVoxelLightCount: { value: number };
+  uShadowCasterCount: { value: number };
   uVoxelLightTexture: { value: THREE.DataTexture };
   uVoxelShadowTexture: { value: THREE.DataTexture };
   uVoxelShadowAtlas: { value: THREE.Vector3 }; // atlas width, height, X-byte stride
@@ -211,6 +214,7 @@ export function createSharedUniforms(): SharedShaderUniforms {
   return {
     uTime: { value: 0 },
     uVoxelLightCount: { value: 0 },
+    uShadowCasterCount: { value: 0 },
     uVoxelLightTexture: { value: lightTexture },
     uVoxelShadowTexture: { value: new THREE.DataTexture(new Uint8Array([0]), 1, 1, THREE.RedFormat) },
     uVoxelShadowAtlas: { value: new THREE.Vector3(1, 1, 1) },
@@ -672,6 +676,7 @@ export function createOceanMaterial(
 // sampled at texel centers; the early break keeps small setups inexpensive.
 const VOXEL_LIGHT_GLSL = /* glsl */ `
   uniform int uVoxelLightCount;
+  uniform int uShadowCasterCount;
   uniform sampler2D uVoxelLightTexture;
   uniform sampler2D uVoxelShadowTexture;
   uniform vec3 uVoxelShadowAtlas;
@@ -738,9 +743,12 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
       float falloff = pow(max(0.0, 1.0 - ratio * ratio * ratio * ratio), 2.0);
       float diffuse = max(0.0, dot(worldNormal, delta / max(distanceToLight, 0.001)));
       if (diffuse <= 0.0 || colorIntensity.a <= 0.0) continue;
-      float visibility = voxelShadowVisibility(worldPos, worldNormal, positionRange.xyz);
-      result += albedo * colorIntensity.rgb * colorIntensity.a *
-        diffuse * falloff * visibility / (1.0 + distanceSquared * 0.06);
+      float contrib = diffuse * falloff * colorIntensity.a / (1.0 + distanceSquared * 0.06);
+      if (contrib < 0.004) continue;
+      float visibility = i < uShadowCasterCount
+        ? voxelShadowVisibility(worldPos, worldNormal, positionRange.xyz)
+        : 1.0;
+      result += albedo * colorIntensity.rgb * contrib * visibility;
     }
     return result;
   }
@@ -765,6 +773,7 @@ export function createPbrVoxelMaterial(
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = shared.uTime;
     shader.uniforms.uVoxelLightCount = shared.uVoxelLightCount;
+    shader.uniforms.uShadowCasterCount = shared.uShadowCasterCount;
     shader.uniforms.uVoxelLightTexture = shared.uVoxelLightTexture;
     shader.uniforms.uVoxelShadowTexture = shared.uVoxelShadowTexture;
     shader.uniforms.uVoxelShadowAtlas = shared.uVoxelShadowAtlas;
@@ -1191,3 +1200,80 @@ export function createMaterialBank(shared: SharedShaderUniforms): MaterialBank {
     },
   };
 }
+
+export const StudioPostShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uResolution: { value: new THREE.Vector2(1440, 900) },
+    uVignette: { value: 0.14 },
+    uChromatic: { value: 0.0 },
+    uPixelate: { value: 0.0 },
+    uTiltShift: { value: 0.0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uResolution;
+    uniform float uVignette;
+    uniform float uChromatic;
+    uniform float uPixelate;
+    uniform float uTiltShift;
+    varying vec2 vUv;
+
+    vec3 sampleScene(vec2 uv) {
+      if (uChromatic > 0.001) {
+        vec2 dir = uv - 0.5;
+        float dist = length(dir);
+        float shift = uChromatic * 0.0075 * dist;
+        return vec3(
+          texture2D(tDiffuse, uv - dir * shift).r,
+          texture2D(tDiffuse, uv).g,
+          texture2D(tDiffuse, uv + dir * shift).b
+        );
+      }
+      return texture2D(tDiffuse, uv).rgb;
+    }
+
+    void main() {
+      vec2 uv = vUv;
+      if (uPixelate > 1.5) {
+        vec2 stepSize = vec2(uPixelate) / max(uResolution, vec2(1.0));
+        uv = floor(uv / stepSize) * stepSize + stepSize * 0.5;
+      }
+
+      vec3 col = sampleScene(uv);
+
+      if (uTiltShift > 0.01) {
+        float focusBand = smoothstep(0.12, 0.48, abs(vUv.y - 0.5));
+        float blurPx = focusBand * uTiltShift * 4.5;
+        if (blurPx > 0.2) {
+          vec2 texel = blurPx / max(uResolution, vec2(1.0));
+          vec3 acc = col * 0.24;
+          acc += sampleScene(uv + vec2(texel.x, 0.0)) * 0.12;
+          acc += sampleScene(uv - vec2(texel.x, 0.0)) * 0.12;
+          acc += sampleScene(uv + vec2(0.0, texel.y)) * 0.12;
+          acc += sampleScene(uv - vec2(0.0, texel.y)) * 0.12;
+          acc += sampleScene(uv + vec2(texel.x, texel.y) * 0.7) * 0.07;
+          acc += sampleScene(uv + vec2(-texel.x, texel.y) * 0.7) * 0.07;
+          acc += sampleScene(uv + vec2(texel.x, -texel.y) * 0.7) * 0.07;
+          acc += sampleScene(uv + vec2(-texel.x, -texel.y) * 0.7) * 0.07;
+          col = acc;
+        }
+      }
+
+      if (uVignette > 0.001) {
+        float d = distance(vUv, vec2(0.5));
+        float vig = 1.0 - smoothstep(0.28, 0.85, d);
+        col *= mix(1.0, mix(0.45, 1.0, vig), uVignette);
+      }
+
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+};

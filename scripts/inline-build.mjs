@@ -26,6 +26,18 @@ if (!entryName) {
 
 let html = readFileSync(path.join(dist, entryName), 'utf8');
 
+// Inline every emitted stylesheet BEFORE scripts so `<link ...>` literals inside
+// compiled JS chunks cannot match HTML stylesheet tag replacement.
+html = html.replace(
+  /<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"[^>]*>/g,
+  (tag, href) => {
+    if (/^https?:/i.test(href)) return tag; // keep external stylesheets (fonts)
+    const file = path.join(dist, href.replace(/^\.?\//, ''));
+    const css = readFileSync(file, 'utf8');
+    return `<style>\n${css.replace(/<\/style/gi, '<\\/style')}\n</style>`;
+  },
+);
+
 // Inline every emitted JS chunk: <script ... src="./assets/x.js"></script>
 html = html.replace(
   /<script\b[^>]*\bsrc="([^"]+)"[^>]*><\/script>/g,
@@ -34,17 +46,6 @@ html = html.replace(
     const js = readFileSync(file, 'utf8');
     // Escape "</script" so string literals inside the bundle can't close the tag.
     return `<script type="module">\n${js.replace(/<\/script/gi, '<\\/script')}\n</script>`;
-  },
-);
-
-// Inline every emitted stylesheet: <link rel="stylesheet" ... href="./assets/x.css">
-html = html.replace(
-  /<link\b[^>]*\brel="stylesheet"[^>]*\bhref="([^"]+)"[^>]*>/g,
-  (tag, href) => {
-    if (/^https?:/i.test(href)) return tag; // keep external stylesheets (fonts)
-    const file = path.join(dist, href.replace(/^\.?\//, ''));
-    const css = readFileSync(file, 'utf8');
-    return `<style>\n${css.replace(/<\/style/gi, '<\\/style')}\n</style>`;
   },
 );
 

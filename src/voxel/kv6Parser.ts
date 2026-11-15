@@ -36,11 +36,24 @@ function lookupIndexed(
   }
 }
 
+export interface SerializedKv6Grid {
+  format: 'kv6';
+  width: number;
+  height: number;
+  depth: number;
+  voxelCount: number;
+  pivot: [number, number, number];
+  dense: Uint32Array | null;
+  sparseKeys: Uint32Array | null;
+  sparseVals: Uint32Array | null;
+  sparseMask: number;
+}
+
 /**
  * Dense or sparse VoxelGrid backed by a flat Uint32Array when grid volume <= 8M,
  * or open-addressed typed hash table for gigantic bounding boxes.
  */
-class Kv6Grid implements VoxelGrid {
+export class Kv6Grid implements VoxelGrid {
   readonly format = 'kv6' as const;
   readonly width: number;
   readonly height: number;
@@ -49,7 +62,7 @@ class Kv6Grid implements VoxelGrid {
   readonly pivot: readonly [number, number, number];
   readonly waterColor: number | null = null;
 
-  private readonly dense: Uint32Array | null;
+  readonly dense: Uint32Array | null;
   /**
    * Open-addressed (linear-probed) hash table for volumes that are too large
    * for a dense array. Keys store `flatIndex + 1` and use `0` as the empty
@@ -57,9 +70,9 @@ class Kv6Grid implements VoxelGrid {
    * (a signed Int32Array would wrap indices >= 2^31 negative and collide with
    * the `-1` empty marker, silently dropping voxels).
    */
-  private readonly sparseKeys: Uint32Array | null;
-  private readonly sparseVals: Uint32Array | null;
-  private readonly sparseMask: number;
+  readonly sparseKeys: Uint32Array | null;
+  readonly sparseVals: Uint32Array | null;
+  readonly sparseMask: number;
 
   constructor(
     width: number,
@@ -128,12 +141,40 @@ class Kv6Grid implements VoxelGrid {
     }
   }
 
+  toSerialized(): SerializedKv6Grid {
+    return {
+      format: 'kv6',
+      width: this.width,
+      height: this.height,
+      depth: this.depth,
+      voxelCount: this.voxelCount,
+      pivot: [this.pivot[0], this.pivot[1], this.pivot[2]],
+      dense: this.dense,
+      sparseKeys: this.sparseKeys,
+      sparseVals: this.sparseVals,
+      sparseMask: this.sparseMask,
+    };
+  }
+}
+
+export function hydrateKv6Grid(data: SerializedKv6Grid): Kv6Grid {
+  return new Kv6Grid(
+    data.width,
+    data.height,
+    data.depth,
+    data.pivot,
+    data.voxelCount,
+    data.dense,
+    data.sparseKeys,
+    data.sparseVals,
+    data.sparseMask,
+  );
 }
 
 /**
  * Parses a Voxlap / Ace of Spades `.kv6` binary buffer into a Y-up Three.js VoxelGrid.
  */
-export function parseKv6(buffer: ArrayBuffer | Uint8Array): VoxelGrid {
+export function parseKv6(buffer: ArrayBuffer | Uint8Array): Kv6Grid {
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
   if (bytes.byteLength < 32) {
     throw new VoxelParseError('File is too small to be a valid .kv6 model (minimum 32 bytes).');
@@ -361,15 +402,15 @@ export function encodeKv6(
 
     let vis = v.vis;
     if (vis === undefined) {
-      // Voxlap .kv6 face bits are 1 = occluded / 0 = visible on each axis, and
-      // the engine only uses the 6 low bits.
+      // Voxlap / SLAB6 .kv6 face bits are 1 = exposed to air / 0 = occluded by
+      // solid on each axis (-x, +x, -y, +y, -z, +z), matching KVX culling.
       vis = 0;
-      if (isOccupied(v.x - 1, v.y, v.z)) vis |= 1;
-      if (isOccupied(v.x + 1, v.y, v.z)) vis |= 2;
-      if (isOccupied(v.x, v.y - 1, v.z)) vis |= 4;
-      if (isOccupied(v.x, v.y + 1, v.z)) vis |= 8;
-      if (isOccupied(v.x, v.y, v.z - 1)) vis |= 16;
-      if (isOccupied(v.x, v.y, v.z + 1)) vis |= 32;
+      if (!isOccupied(v.x - 1, v.y, v.z)) vis |= 1;
+      if (!isOccupied(v.x + 1, v.y, v.z)) vis |= 2;
+      if (!isOccupied(v.x, v.y - 1, v.z)) vis |= 4;
+      if (!isOccupied(v.x, v.y + 1, v.z)) vis |= 8;
+      if (!isOccupied(v.x, v.y, v.z - 1)) vis |= 16;
+      if (!isOccupied(v.x, v.y, v.z + 1)) vis |= 32;
     }
     vis &= 0x3f;
     out[off + 6] = vis;

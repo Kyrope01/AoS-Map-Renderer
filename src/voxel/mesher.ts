@@ -2,6 +2,20 @@ import * as THREE from 'three';
 import { RegionBounds, VoxelFormat, VoxelGrid } from './types';
 import { VxlGrid } from './vxlParser';
 
+export interface BuiltVoxelMeshData {
+  positions: Float32Array;
+  normals: Float32Array;
+  colors: Float32Array;
+  ao: Float32Array;
+  indices: Uint16Array | Uint32Array;
+  format: VoxelFormat;
+  waterColorHex: string | null;
+  quadCount: number;
+  triangleCount: number;
+  center: [number, number, number];
+  size: [number, number, number];
+}
+
 export interface BuiltVoxelMesh {
   geometry: THREE.BufferGeometry;
   format: VoxelFormat;
@@ -86,13 +100,13 @@ function vxlSolid(
 }
 
 /**
- * Builds an optimized greedy-meshed BufferGeometry with per-vertex Voxel AO.
- * The resulting geometry is centered horizontally at X=0, Z=0 and grounded at Y=0.
+ * Builds greedy-meshed typed arrays with per-vertex Voxel AO.
+ * Pure worker-safe data builder (no Three.js BufferGeometry allocation).
  */
-export function buildVoxelGeometry(
+export function buildVoxelGeometryData(
   grid: VoxelGrid,
   bounds?: RegionBounds,
-): BuiltVoxelMesh {
+): BuiltVoxelMeshData {
   const minX = Math.max(0, bounds?.minX ?? 0);
   const maxX = Math.min(grid.width, bounds?.maxX ?? grid.width);
   const minY = Math.max(0, bounds?.minY ?? 0);
@@ -552,25 +566,22 @@ export function buildVoxelGeometry(
 
   const vCount = quadCount * 4;
   const iCount = quadCount * 6;
-  // `.slice()` (not `.subarray()`) so the GPU upload does not pin the whole
+  // `.slice()` (not `.subarray()`) so transfers and GPU uploads do not pin the
   // doubled scratch allocation: a buffer that grew to 2x capacity would
   // otherwise retain twice the memory it actually needs.
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.BufferAttribute(posArr.slice(0, vCount * 3), 3));
-  geometry.setAttribute('normal', new THREE.BufferAttribute(normArr.slice(0, vCount * 3), 3));
-  geometry.setAttribute('color', new THREE.BufferAttribute(colArr.slice(0, vCount * 3), 3));
-  geometry.setAttribute('aAo', new THREE.BufferAttribute(aoArr.slice(0, vCount), 1));
+  const positions = posArr.slice(0, vCount * 3);
+  const normals = normArr.slice(0, vCount * 3);
+  const colors = colArr.slice(0, vCount * 3);
+  const ao = aoArr.slice(0, vCount);
 
+  let indices: Uint16Array | Uint32Array;
   if (vCount <= 65535) {
     const smallIdx = new Uint16Array(iCount);
     for (let i = 0; i < iCount; i++) smallIdx[i] = idxArr[i];
-    geometry.setIndex(new THREE.BufferAttribute(smallIdx, 1));
+    indices = smallIdx;
   } else {
-    geometry.setIndex(new THREE.BufferAttribute(idxArr.slice(0, iCount), 1));
+    indices = idxArr.slice(0, iCount);
   }
-
-  geometry.computeBoundingBox();
-  geometry.computeBoundingSphere();
 
   const waterColorHex =
     grid.waterColor !== null
@@ -578,12 +589,51 @@ export function buildVoxelGeometry(
       : null;
 
   return {
-    geometry,
+    positions,
+    normals,
+    colors,
+    ao,
+    indices,
     format: grid.format,
     waterColorHex,
     quadCount,
     triangleCount: quadCount * 2,
-    center: new THREE.Vector3(0, dims[1] * 0.5, 0),
-    size: new THREE.Vector3(dims[0], dims[1], dims[2]),
+    center: [0, dims[1] * 0.5, 0],
+    size: [dims[0], dims[1], dims[2]],
   };
+}
+
+/**
+ * Wraps worker-built typed arrays into a Three.js BufferGeometry on the main thread.
+ */
+export function hydrateVoxelGeometry(data: BuiltVoxelMeshData): BuiltVoxelMesh {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
+  geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
+  geometry.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+  geometry.setAttribute('aAo', new THREE.BufferAttribute(data.ao, 1));
+  geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+
+  return {
+    geometry,
+    format: data.format,
+    waterColorHex: data.waterColorHex,
+    quadCount: data.quadCount,
+    triangleCount: data.triangleCount,
+    center: new THREE.Vector3(data.center[0], data.center[1], data.center[2]),
+    size: new THREE.Vector3(data.size[0], data.size[1], data.size[2]),
+  };
+}
+
+/**
+ * Builds an optimized greedy-meshed BufferGeometry with per-vertex Voxel AO.
+ * The resulting geometry is centered horizontally at X=0, Z=0 and grounded at Y=0.
+ */
+export function buildVoxelGeometry(
+  grid: VoxelGrid,
+  bounds?: RegionBounds,
+): BuiltVoxelMesh {
+  return hydrateVoxelGeometry(buildVoxelGeometryData(grid, bounds));
 }

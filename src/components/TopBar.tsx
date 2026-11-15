@@ -279,6 +279,9 @@ export function TopBar({
                       )}
                     </div>
                   </div>
+                  <p className="px-1 text-[10px] leading-snug text-[#8F98A6]">
+                    Exports above ~16 MP approximate post-processing.
+                  </p>
                 </div>
               )}
             </div>

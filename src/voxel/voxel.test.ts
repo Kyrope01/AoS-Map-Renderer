@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { encodeKv6, parseKv6 } from './kv6Parser';
-import { encodeVxl, parseVxl } from './vxlParser';
-import { buildVoxelGeometry } from './mesher';
+import { encodeKv6, hydrateKv6Grid, parseKv6 } from './kv6Parser';
+import { encodeVxl, hydrateVxlGrid, parseVxl } from './vxlParser';
+import { buildVoxelGeometry, buildVoxelGeometryData, hydrateVoxelGeometry } from './mesher';
+import { buildVoxelShadowData } from '../renderer/voxelShadows';
 import {
+  canUseSinglePassExport,
   computeExportTiles,
   computeUpscaledDimensions,
   formatResolutionLabel,
   MAX_EXPORT_LONG_EDGE,
+  SINGLE_PASS_MAX_PIXELS,
 } from './exportResolution';
 import { VoxelParseError } from './types';
 
@@ -361,4 +364,56 @@ test('kv6 voxelCount ignores skipped and duplicate voxels', () => {
   assert.equal(grid.voxelCount, 1);
   // Packed colors are unsigned once stored in a Uint32Array.
   assert.equal(grid.getColor(1, 2, 1) >>> 0, (0xff000000 | (9 << 16) | (9 << 8) | 9) >>> 0);
+});
+
+test('kv6 vis-mask sets 1 for exposed faces (63 for isolated voxel, clears shared faces)', () => {
+  const isolated = encodeKv6(3, 3, 3, [{ x: 1, y: 1, z: 1, r: 255, g: 0, b: 0 }]);
+  assert.equal(isolated[38], 63);
+
+  const adjacent = encodeKv6(3, 3, 3, [
+    { x: 0, y: 1, z: 1, r: 255, g: 0, b: 0 },
+    { x: 1, y: 1, z: 1, r: 0, g: 255, b: 0 },
+  ]);
+  // Sorted (x,y,z): first voxel has +x occupied (clears bit 2 -> 61), second has -x occupied (clears bit 1 -> 62).
+  assert.equal(adjacent[38], 61);
+  assert.equal(adjacent[46], 62);
+});
+
+test('single-pass export enforces pixel area cap even when GPU allows 16K dimensions', () => {
+  assert.equal(SINGLE_PASS_MAX_PIXELS, 4096 * 4096);
+  // 4K (8.3 MP) keeps full composer post-FX
+  assert.equal(canUseSinglePassExport(3840, 2160, 16384, 16384, true, false), true);
+  // Exact 16.8 MP cap passes
+  assert.equal(canUseSinglePassExport(4096, 4096, 16384, 16384, true, false), true);
+  // 8K (33 MP) and 16K (147 MP) fall back to tiling even on 16K-capable GPUs
+  assert.equal(canUseSinglePassExport(7680, 4320, 16384, 16384, true, false), false);
+  assert.equal(canUseSinglePassExport(15360, 9600, 16384, 16384, true, false), false);
+  // Software GL always tiles
+  assert.equal(canUseSinglePassExport(3840, 2160, 16384, 16384, true, true), false);
+});
+
+test('kv6 and vxl serialize/hydrate cleanly for worker transfer alongside mesh and shadow atlas data', () => {
+  const kv6Buf = encodeKv6(4, 4, 4, [{ x: 1, y: 2, z: 1, r: 100, g: 150, b: 200 }]);
+  const kv6Orig = parseKv6(kv6Buf);
+  const kv6Hydrated = hydrateKv6Grid(kv6Orig.toSerialized());
+  assert.equal(kv6Hydrated.voxelCount, 1);
+  assert.equal(kv6Hydrated.getColor(1, 2, 2), kv6Orig.getColor(1, 2, 2));
+
+  const meshData = buildVoxelGeometryData(kv6Hydrated);
+  const mesh = hydrateVoxelGeometry(meshData);
+  assert.equal(mesh.quadCount, 6);
+  mesh.geometry.dispose();
+
+  const atlas = buildVoxelShadowData(kv6Hydrated, 4096);
+  assert.ok(atlas.data.some((byte) => byte !== 0));
+
+  const vxlOrig = parseVxl(
+    encodeVxl(2, 2, 8, (_gx, gy, _gz) => (gy === 0 ? 0xff112233 : 0)),
+    { width: 2, depth: 2, height: 8 },
+  );
+  const vxlHydrated = hydrateVxlGrid(vxlOrig.toSerialized());
+  assert.equal(vxlHydrated.isSolid(1, 0, 1), true);
+  assert.equal(vxlHydrated.isSolid(1, 1, 1), false);
+  assert.equal(vxlHydrated.surfGy.byteOffset, 0);
+  assert.equal(vxlHydrated.surfColor.byteOffset, 0);
 });

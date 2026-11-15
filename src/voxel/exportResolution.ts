@@ -52,6 +52,27 @@ export function formatResolutionLabel(width: number, height: number): string {
   return tag ? `${width}×${height} (${tag})` : `${width}×${height}`;
 }
 
+// ~21 B/px for the composer's two half-float targets + bloom mips.
+// 16.8 MP keeps the transient allocation under ~400 MB.
+export const SINGLE_PASS_MAX_PIXELS = 4096 * 4096;
+
+export function canUseSinglePassExport(
+  targetW: number,
+  targetH: number,
+  maxTex: number,
+  maxRb: number,
+  hasComposer: boolean,
+  isSoftwareGl: boolean,
+): boolean {
+  return (
+    hasComposer &&
+    !isSoftwareGl &&
+    targetW <= maxTex &&
+    targetH <= maxRb &&
+    targetW * targetH <= SINGLE_PASS_MAX_PIXELS
+  );
+}
+
 export function computeExportTiles(
   totalWidth: number,
   totalHeight: number,

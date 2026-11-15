@@ -5,8 +5,15 @@ import { VxlGrid } from '../voxel/vxlParser';
 // Float shader indexing is exact up to 2^24. One byte stores eight X voxels.
 const MAX_SHADOW_BYTES = 1 << 24;
 
-/** Build a bit-packed occupancy atlas used by point-light shadow rays. */
-export function createVoxelShadowTexture(grid: VoxelGrid, maxTextureSize: number) {
+export interface VoxelShadowAtlasData {
+  data: Uint8Array;
+  width: number;
+  height: number;
+  stride: number;
+}
+
+/** Build raw bit-packed occupancy atlas bytes (worker-safe, no WebGL/Three texture). */
+export function buildVoxelShadowData(grid: VoxelGrid, maxTextureSize: number): VoxelShadowAtlasData {
   const stride = Math.ceil(grid.width / 8);
   const bytes = stride * grid.height * grid.depth;
   const width = Math.min(4096, maxTextureSize, Math.max(1, bytes));
@@ -40,10 +47,20 @@ export function createVoxelShadowTexture(grid: VoxelGrid, maxTextureSize: number
       for (let z = 0; z < grid.depth; z++)
         for (let x = 0; x < grid.width; x++) if (grid.isSolid(x, y, z)) set(x, y, z);
   }
-  const texture = new THREE.DataTexture(data, width, height, THREE.RedFormat, THREE.UnsignedByteType);
+  return { data, stride, width, height };
+}
+
+/** Wrap precomputed shadow atlas bytes in a Three.js DataTexture on the main thread. */
+export function hydrateVoxelShadowTexture(atlas: VoxelShadowAtlasData) {
+  const texture = new THREE.DataTexture(atlas.data, atlas.width, atlas.height, THREE.RedFormat, THREE.UnsignedByteType);
   texture.magFilter = THREE.NearestFilter;
   texture.minFilter = THREE.NearestFilter;
   texture.unpackAlignment = 1;
   texture.needsUpdate = true;
-  return { texture, stride, width, height };
+  return { texture, stride: atlas.stride, width: atlas.width, height: atlas.height };
+}
+
+/** Build a bit-packed occupancy atlas used by point-light shadow rays. */
+export function createVoxelShadowTexture(grid: VoxelGrid, maxTextureSize: number) {
+  return hydrateVoxelShadowTexture(buildVoxelShadowData(grid, maxTextureSize));
 }

@@ -109,7 +109,8 @@ def check_file(path: Path) -> None:
         return
 
     for match in re.finditer(
-        r"\bsmoothstep\s*\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,", raw
+        r"\bsmoothstep\s*\(\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*,\s*([-+]?(?:\d+\.?\d*|\.\d+))\s*,",
+        raw,
     ):
         low, high = float(match.group(1)), float(match.group(2))
         if low >= high:
