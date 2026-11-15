@@ -1,0 +1,6 @@
+{
+  "name": "Voxatelier — KV6 & VXL Voxel Studio",
+  "description": "3D model renderer and shader studio for Voxlap .kv6 and Ace of Spades .vxl voxel files.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
