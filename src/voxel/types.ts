@@ -93,9 +93,12 @@ export interface RenderSettings {
   waterColorOverride: string; // empty = sampled .vxl water color
   waveStrength: number;     // 0..1.0 ocean ripple & shimmer
   autoRotate: boolean;
+  autoRotateSpeed: number;  // 0.2..10.0
   orthographic: boolean;
   exposure: number;         // 0.6..1.6
   bloomStrength: number;    // 0..1.0
+  godRays: boolean;         // volumetric light rays from sun/moon
+  godRaysIntensity: number; // 0.1..1.5
   tiltShift: number;        // 0..1.0 miniature DOF blur
   vignette: number;         // 0..1.0
   chromatic: number;        // 0..1.0

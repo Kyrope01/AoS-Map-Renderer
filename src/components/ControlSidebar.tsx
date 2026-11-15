@@ -2,6 +2,7 @@ import {
   Camera,
   CloudSun,
   Copy,
+  RotateCw,
   SlidersHorizontal,
   Sparkles,
   Trash2,
@@ -24,7 +25,7 @@ import {
   VoxelLight,
 } from '../voxel/types';
 
-type SidebarTab = 'effects' | 'shaders' | 'material' | 'atmosphere' | 'camera';
+type SidebarTab = 'effects' | 'shaders' | 'material' | 'atmosphere' | 'camera' | 'turntable';
 
 interface ControlSidebarProps {
   settings: RenderSettings;
@@ -373,6 +374,9 @@ export function ControlSidebar({
     { id: 'material', label: 'Material', icon: SlidersHorizontal },
     { id: 'atmosphere', label: 'Sky & Fog', icon: CloudSun },
     { id: 'camera', label: 'Camera', icon: Camera },
+    ...(stats?.format === 'kv6'
+      ? [{ id: 'turntable' as SidebarTab, label: 'Turntable', icon: RotateCw }]
+      : []),
   ];
 
   return (
@@ -456,8 +460,81 @@ export function ControlSidebar({
 
       {/* Scrollable Tab Body */}
       <div className="flex-1 overflow-y-auto px-3.5 py-3 space-y-4">
+        {activeTab === 'turntable' && stats?.format === 'kv6' && (
+          <div className="space-y-4">
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <span className="text-xs font-medium text-[#C6CDD9]">Turntable Rotation</span>
+                  <p className="text-[10px] text-[#7D8696]">Orbit around the KV6 model</p>
+                </div>
+                <button
+                  type="button"
+                  aria-pressed={settings.autoRotate}
+                  disabled={settings.cameraMode === 'free'}
+                  title={
+                    settings.cameraMode === 'free'
+                      ? 'Turntable rotation works in orbit mode only — press F to leave free cam'
+                      : 'Slowly orbit the camera around the model'
+                  }
+                  onClick={() => onUpdateSettings({ autoRotate: !settings.autoRotate })}
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-colors ${
+                    settings.cameraMode === 'free'
+                      ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
+                      : settings.autoRotate
+                        ? activeBtn
+                        : inactiveBtn
+                  }`}
+                >
+                  {settings.autoRotate ? 'On' : 'Off'}
+                </button>
+              </div>
+              <SliderControl
+                id="turntable-speed"
+                label="Turntable Speed"
+                value={settings.autoRotateSpeed}
+                min={0.2}
+                max={10.0}
+                step={0.1}
+                displayValue={`${settings.autoRotateSpeed.toFixed(1)}×`}
+                onChange={(v) => onUpdateSettings({ autoRotateSpeed: v })}
+              />
+            </div>
+          </div>
+        )}
+
         {activeTab === 'effects' && (
           <div className="space-y-4">
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <span className="text-xs font-medium text-[#C6CDD9]">Light Rays (God Rays)</span>
+                  <p className="text-[10px] text-[#7D8696]">Low quality live, high quality on PNG export</p>
+                </div>
+                <button
+                  type="button"
+                  aria-pressed={settings.godRays}
+                  onClick={() => onUpdateSettings({ godRays: !settings.godRays })}
+                  className={`px-2.5 py-1 rounded text-[11px] font-medium border transition-colors cursor-pointer ${
+                    settings.godRays ? activeBtn : inactiveBtn
+                  }`}
+                >
+                  {settings.godRays ? 'On' : 'Off'}
+                </button>
+              </div>
+              {settings.godRays && (
+                <SliderControl
+                  id="misc-god-rays-intensity"
+                  label="Ray Intensity"
+                  value={settings.godRaysIntensity}
+                  min={0.1}
+                  max={1.5}
+                  step={0.05}
+                  displayValue={`${Math.round(settings.godRaysIntensity * 100)}%`}
+                  onChange={(v) => onUpdateSettings({ godRaysIntensity: v })}
+                />
+              )}
+            </div>
             <button
               type="button"
               aria-expanded={lightsOpen}
@@ -1272,56 +1349,6 @@ export function ControlSidebar({
                   onChange={(v) => onUpdateSettings({ cameraFov: v })}
                 />
               )}
-            </div>
-
-            <div className={`pt-3 border-t space-y-2 ${dividerClass}`}>
-              <span className={sectionLabel}>View Options</span>
-              <div className="grid grid-cols-2 gap-1.5">
-                <button
-                  type="button"
-                  aria-pressed={settings.orthographic}
-                  onClick={() => onUpdateSettings({ orthographic: !settings.orthographic })}
-                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
-                    settings.orthographic ? activeBtn : inactiveBtn
-                  }`}
-                >
-                  Orthographic
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={settings.autoRotate}
-                  // Turntable spin only orbits the camera, so it is disabled (rather
-                  // than silently ignored) while free cam is active.
-                  disabled={settings.cameraMode === 'free'}
-                  title={
-                    settings.cameraMode === 'free'
-                      ? 'Turntable spin works in orbit mode only — press F to leave free cam'
-                      : 'Slowly orbit the camera around the model'
-                  }
-                  onClick={() => onUpdateSettings({ autoRotate: !settings.autoRotate })}
-                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors ${
-                    settings.cameraMode === 'free'
-                      ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
-                      : settings.autoRotate
-                        ? `${activeBtn} cursor-pointer`
-                        : `${inactiveBtn} cursor-pointer`
-                  }`}
-                >
-                  Turntable Spin
-                </button>
-                {(!stats || stats.format === 'kv6') && (
-                  <button
-                    type="button"
-                    aria-pressed={settings.showPedestal}
-                    onClick={() => onUpdateSettings({ showPedestal: !settings.showPedestal })}
-                    className={`col-span-2 px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
-                      settings.showPedestal ? activeBtn : inactiveBtn
-                    }`}
-                  >
-                    KV6 Display Plate
-                  </button>
-                )}
-              </div>
             </div>
 
             <div className={`pt-3 border-t space-y-3 ${dividerClass}`}>

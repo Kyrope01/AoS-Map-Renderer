@@ -23,6 +23,8 @@ interface TopBarProps {
   onToggleCameraMode: () => void;
   getDisplayResolution: () => { width: number; height: number };
   onExportPng: (targetWidth?: number) => Promise<void>;
+  onExportGif?: () => Promise<void>;
+  isKv6?: boolean;
   onToggleSidebar: () => void;
 }
 
@@ -35,6 +37,8 @@ export function TopBar({
   onToggleCameraMode,
   getDisplayResolution,
   onExportPng,
+  onExportGif,
+  isKv6 = false,
   onToggleSidebar,
 }: TopBarProps) {
   const [exportOpen, setExportOpen] = useState(false);
@@ -213,6 +217,27 @@ export function TopBar({
                       {baseRes.width}×{baseRes.height}
                     </span>
                   </button>
+
+                  {isKv6 && onExportGif && (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={isExporting}
+                      onClick={async () => {
+                        setIsExporting(true);
+                        setExportOpen(false);
+                        try {
+                          await onExportGif();
+                        } finally {
+                          setIsExporting(false);
+                        }
+                      }}
+                      className="w-full flex items-center justify-between gap-2 px-2.5 py-2 rounded-md border border-white/10 bg-white/5 hover:bg-white/10 text-left transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <span className="text-xs font-semibold text-[#F3F1EC]">Export GIF</span>
+                      <span className="text-[10px] text-[#8F98A6]">360° Turntable</span>
+                    </button>
+                  )}
 
                   {/* Export Upscaled: looks just like Export PNG button with integrated slider & editable resolution */}
                   <div className="w-full rounded-md border border-white/10 bg-white/5 p-2.5 space-y-2">
