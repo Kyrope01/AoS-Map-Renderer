@@ -1,5 +1,6 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import * as THREE from 'three';
+import { GIFEncoder, quantize, applyPalette } from 'gifenc';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
@@ -45,6 +46,7 @@ import {
   MAX_VOXEL_SHADOW_CASTERS,
   SharedShaderUniforms,
   StudioPostShader,
+  GodRaysShader,
   syncSharedUniforms,
 } from './shaders';
 import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
@@ -54,6 +56,7 @@ export interface VoxelViewportHandle {
   getDisplayResolution: () => { width: number; height: number };
   getMaxTextureSize: () => number;
   exportPng: (filename: string, targetWidth?: number) => Promise<void>;
+  exportGif: (filename: string) => Promise<void>;
   /** Projects a voxel-grid coordinate to viewport-relative CSS pixels. */
   projectVoxelToScreen: (
     x: number,
@@ -219,6 +222,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       getDisplayResolution: () => { width: number; height: number };
       getMaxTextureSize: () => number;
       exportPng: (filename: string, targetWidth?: number) => Promise<void>;
+      exportGif: (filename: string) => Promise<void>;
       projectVoxelToScreen: (
         x: number,
         y: number,
@@ -248,6 +252,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       exportPng: async (filename: string, targetWidth?: number) => {
         if (engineRef.current) {
           await engineRef.current.exportPng(filename, targetWidth);
+        }
+      },
+      exportGif: async (filename: string) => {
+        if (engineRef.current) {
+          await engineRef.current.exportGif(filename);
         }
       },
       projectVoxelToScreen: (x: number, y: number, z: number) => {
@@ -1053,6 +1062,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       // Post-Processing Composer (GPU only; crisp high-threshold bloom)
       let composer: EffectComposer | null = null;
       let renderPass: RenderPass | null = null;
+      let godRaysPass: ShaderPass | null = null;
       let bloomPass: UnrealBloomPass | null = null;
       let studioPass: ShaderPass | null = null;
       let outputPass: OutputPass | null = null;
@@ -1061,6 +1071,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         composer = new EffectComposer(renderer);
         renderPass = new RenderPass(scene, activeCamera);
         composer.addPass(renderPass);
+        godRaysPass = new ShaderPass(GodRaysShader);
+        godRaysPass.enabled = settingsRef.current.godRays;
+        composer.addPass(godRaysPass);
         bloomPass = new UnrealBloomPass(
           new THREE.Vector2(width, height), settingsRef.current.bloomStrength, 0.32, 0.94,
         );
@@ -1154,8 +1167,32 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let lastTime = performance.now();
       let elapsedSec = 1.4;
 
+      const _godRaySunWorld = new THREE.Vector3();
+      const _godRayCamDir = new THREE.Vector3();
+
       const drawFrame = () => {
         skyMesh.position.copy(activeCamera.position);
+        controls.autoRotateSpeed = settingsRef.current.autoRotateSpeed;
+
+        if (godRaysPass) {
+          const enabled = settingsRef.current.godRays;
+          godRaysPass.enabled = enabled;
+          if (enabled) {
+            const sunDir = _godRaySunWorld.copy(keyLight.position).normalize();
+            activeCamera.getWorldDirection(_godRayCamDir);
+            const facing = _godRayCamDir.dot(sunDir);
+            godRaysPass.uniforms.uVisibility.value = THREE.MathUtils.smoothstep(facing, -0.15, 0.25);
+            _godRaySunWorld.multiplyScalar(1000).add(activeCamera.position);
+            _godRaySunWorld.project(activeCamera);
+            godRaysPass.uniforms.uLightPos.value.set(
+              _godRaySunWorld.x * 0.5 + 0.5,
+              _godRaySunWorld.y * 0.5 + 0.5,
+            );
+            godRaysPass.uniforms.uSunColor.value.set(settingsRef.current.sunColor);
+            godRaysPass.uniforms.uIntensity.value = settingsRef.current.godRaysIntensity;
+          }
+        }
+
         if (composer && !isSoftwareGl) composer.render();
         else renderer.render(scene, activeCamera);
         if (!isExporting) {
@@ -1254,7 +1291,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           }
         } else {
           if (s.autoRotate && !camAnimating) {
-            const speed = 0.32 * dt;
+            const speed = 0.32 * s.autoRotateSpeed * dt;
             _offsetVec.copy(activeCamera.position).sub(controls.target);
             _offsetVec.applyAxisAngle(_worldUp, speed);
             activeCamera.position.copy(controls.target).add(_offsetVec);
@@ -1984,6 +2021,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
 
+        if (godRaysPass) {
+          godRaysPass.uniforms.uSamples.value = 72;
+        }
+
         try {
           if (!targetWidth || targetWidth <= baseW) {
             drawFrame();
@@ -2114,6 +2155,95 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             restoreRendererSize();
           }
         } finally {
+          if (godRaysPass) {
+            godRaysPass.uniforms.uSamples.value = 16;
+          }
+          markerGroup.visible = savedMarkerVisible;
+          hoverBox.visible = savedHoverVisible;
+          playerHelperGroup.visible = savedPlayerHelpersVisible;
+          isExporting = false;
+          renderDirty = false;
+          drawFrame();
+          if (resumeLoopAfterExport && needsContinuousLoop()) {
+            isLoopRunning = true;
+            lastTime = performance.now();
+            if (isSoftwareGl) afterDraw(tick);
+            else frameId = requestAnimationFrame(tick);
+          }
+        }
+      };
+
+      const exportGif = async (filename: string) => {
+        isExporting = true;
+        const resumeLoopAfterExport = isLoopRunning;
+        if (isLoopRunning) {
+          isLoopRunning = false;
+          cancelAnimationFrame(frameId);
+          clearTimeout(frameId);
+        }
+        frameId = 0;
+
+        const savedMarkerVisible = markerGroup.visible;
+        const savedHoverVisible = hoverBox.visible;
+        const savedPlayerHelpersVisible = playerHelperGroup.visible;
+        markerGroup.visible = false;
+        hoverBox.visible = false;
+        playerHelperGroup.visible = false;
+
+        const savedCamPos = activeCamera.position.clone();
+        const savedTarget = controls.target.clone();
+        const savedAutoRotate = controls.autoRotate;
+        controls.autoRotate = false;
+
+        try {
+          const srcW = Math.max(1, renderer.domElement.width);
+          const srcH = Math.max(1, renderer.domElement.height);
+          const maxGifW = 640;
+          const gifW = srcW > maxGifW ? maxGifW : srcW;
+          const gifH = Math.max(1, Math.round((srcH * gifW) / srcW));
+
+          const offscreen = document.createElement('canvas');
+          offscreen.width = gifW;
+          offscreen.height = gifH;
+          const ctx = offscreen.getContext('2d', { willReadFrequently: true });
+          if (!ctx) throw new Error('Could not create 2D canvas for GIF export.');
+
+          const gif = GIFEncoder();
+          const totalFrames = 48;
+          const delayMs = 60;
+          const offset = savedCamPos.clone().sub(savedTarget);
+          const yAxis = new THREE.Vector3(0, 1, 0);
+
+          for (let i = 0; i < totalFrames; i++) {
+            const angle = (i / totalFrames) * Math.PI * 2;
+            const rotated = offset.clone().applyAxisAngle(yAxis, angle);
+            activeCamera.position.copy(savedTarget).add(rotated);
+            activeCamera.lookAt(savedTarget);
+            activeCamera.updateMatrixWorld();
+
+            drawFrame();
+            ctx.drawImage(renderer.domElement, 0, 0, gifW, gifH);
+            const { data } = ctx.getImageData(0, 0, gifW, gifH);
+            const palette = quantize(data, 256);
+            const index = applyPalette(data, palette);
+            gif.writeFrame(index, gifW, gifH, { palette, delay: delayMs });
+            // Yield briefly so the browser stays responsive
+            await new Promise((r) => setTimeout(r, 0));
+          }
+
+          gif.finish();
+          const blob = new Blob([new Uint8Array(gif.bytes())], { type: 'image/gif' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } finally {
+          activeCamera.position.copy(savedCamPos);
+          controls.target.copy(savedTarget);
+          controls.autoRotate = savedAutoRotate;
+          controls.update();
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
           playerHelperGroup.visible = savedPlayerHelpersVisible;
@@ -2158,6 +2288,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         getDisplayResolution,
         getMaxTextureSize: () => renderer.capabilities.maxTextureSize || 4096,
         exportPng,
+        exportGif,
         projectVoxelToScreen,
         projectWorldToScreen,
       };

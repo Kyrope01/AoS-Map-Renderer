@@ -65,9 +65,12 @@ const DEFAULT_SETTINGS: RenderSettings = {
   waterColorOverride: '',
   waveStrength: 0.45,
   autoRotate: false,
+  autoRotateSpeed: 1.2,
   orthographic: false,
   exposure: 1.0,
   bloomStrength: 0.03,
+  godRays: false,
+  godRaysIntensity: 0.65,
   tiltShift: 0,
   vignette: 0.14,
   chromatic: 0,
@@ -345,6 +348,15 @@ export default function App() {
       const built = hydrateVoxelGeometry(response.mesh);
       const baseName = file.name.replace(/\.(kv6|vxl)$/i, '');
 
+      if (grid.format === 'kv6') {
+        setSettings((prev) => ({
+          ...prev,
+          backdrop: 'custom',
+          customZenithColor: '#000000',
+          customHorizonColor: '#000000',
+        }));
+      }
+
       setLoadedModel({
         name: baseName,
         grid,
@@ -596,6 +608,19 @@ export default function App() {
             height: window.innerHeight,
           }
         }
+        isKv6={loadedModel?.stats.format === 'kv6'}
+        onExportGif={async () => {
+          if (!loadedModel || !viewportRef.current) return;
+          try {
+            await viewportRef.current.exportGif(
+              `${loadedModel.name.toLowerCase().replace(/\s+/g, '-')}-${settings.shaderMode}-turntable.gif`,
+            );
+          } catch (err) {
+            setErrorMsg(
+              err instanceof Error ? err.message : 'GIF export failed.',
+            );
+          }
+        }}
         onExportPng={async (targetWidth?: number) => {
           if (!loadedModel || !viewportRef.current) return;
           const suffix = targetWidth ? `-${targetWidth}w` : '';

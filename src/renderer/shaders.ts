@@ -1329,3 +1329,59 @@ export const StudioPostShader = {
     }
   `,
 };
+
+export const GodRaysShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uLightPos: { value: new THREE.Vector2(0.5, 0.5) },
+    uSunColor: { value: new THREE.Color('#ffffff') },
+    uIntensity: { value: 0.65 },
+    uSamples: { value: 16 },
+    uVisibility: { value: 1.0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uLightPos;
+    uniform vec3 uSunColor;
+    uniform float uIntensity;
+    uniform int uSamples;
+    uniform float uVisibility;
+    varying vec2 vUv;
+
+    void main() {
+      vec4 base = texture2D(tDiffuse, vUv);
+      if (uIntensity <= 0.001 || uVisibility <= 0.001 || uSamples <= 0) {
+        gl_FragColor = base;
+        return;
+      }
+
+      vec2 coord = vUv;
+      vec2 delta = (vUv - uLightPos) * (0.92 / float(uSamples));
+      vec3 accum = vec3(0.0);
+      float illuminationDecay = 1.0;
+
+      for (int i = 0; i < 96; i++) {
+        if (i >= uSamples) break;
+        coord -= delta;
+        if (coord.x >= 0.0 && coord.x <= 1.0 && coord.y >= 0.0 && coord.y <= 1.0) {
+          vec3 s = texture2D(tDiffuse, coord).rgb;
+          float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
+          float bright = smoothstep(0.42, 1.15, lum);
+          accum += s * bright * illuminationDecay;
+        }
+        illuminationDecay *= 0.965;
+      }
+
+      vec3 rays = (accum / float(uSamples)) * uIntensity * uVisibility * uSunColor;
+      gl_FragColor = vec4(base.rgb + rays, base.a);
+    }
+  `,
+};
+
