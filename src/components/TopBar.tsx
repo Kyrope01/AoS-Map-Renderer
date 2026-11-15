@@ -251,8 +251,14 @@ export function TopBar({
                           onChange={(e) => setCustomInputVal(e.target.value)}
                           onBlur={commitCustomRes}
                           onKeyDown={(e) => {
-                            if (e.key === 'Enter') commitCustomRes();
-                            if (e.key === 'Escape') setIsEditingRes(false);
+                            // The window-level Escape handler would close the whole
+                            // export menu while the user is only cancelling the edit.
+                            if (e.key === 'Escape') {
+                              e.stopPropagation();
+                              setIsEditingRes(false);
+                            } else if (e.key === 'Enter') {
+                              commitCustomRes();
+                            }
                           }}
                           className="w-22 px-1 py-0.5 text-right font-mono-tabular text-[10px] bg-black/60 border border-[#E05A2B] rounded text-white focus:outline-none"
                           autoFocus

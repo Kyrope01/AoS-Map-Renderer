@@ -251,7 +251,7 @@ function InlineColorPicker({
       </div>
 
       {/* Preset Swatches row */}
-      <div className="flex items-center gap-1 overflow-x-auto py-0.5 scrollbar-none">
+      <div className="flex items-center gap-1 overflow-x-auto py-0.5 swatch-row">
         {presetPalette.map((p) => {
           const isSelected = value.toLowerCase() === p.hex.toLowerCase();
           return (
@@ -355,6 +355,9 @@ export function ControlSidebar({
     <aside
       aria-label="Render Studio Sidebar"
       aria-hidden={collapsed}
+      // `aria-hidden` + pointer-events-none still leaves every control reachable
+      // with Tab, so the collapsed panel would swallow keyboard focus.
+      inert={collapsed}
       className={`fixed top-3 right-3 bottom-3 z-20 w-[min(304px,calc(100vw-24px))] flex flex-col rounded-lg border shadow-xl transition-transform duration-200 ease-out ${panelSurface} ${
         collapsed ? 'translate-x-[calc(100%+20px)] pointer-events-none' : 'translate-x-0'
       }`}
@@ -689,13 +692,32 @@ export function ControlSidebar({
                     <button
                       key={key}
                       type="button"
-                      onClick={() =>
-                        onUpdateSettings({
-                          backdrop: key,
-                          sunColor: theme.defaultSunHex,
-                          fogColor: isCustom ? settings.customHorizonColor : theme.fogHex,
-                        })
-                      }
+                      onClick={() => {
+                        // Only adopt the new preset's sun/fog colours when the user
+                        // has not hand-picked their own; switching backdrops used to
+                        // silently overwrite a custom sun colour and, with Sync Sky
+                        // off, a custom fog colour too.
+                        const prevTheme = BACKDROP_THEMES[settings.backdrop];
+                        const sunIsPresetDefault =
+                          settings.sunColor.toLowerCase() ===
+                            prevTheme.defaultSunHex.toLowerCase() ||
+                          Object.values(BACKDROP_THEMES).some(
+                            (t) => t.defaultSunHex.toLowerCase() === settings.sunColor.toLowerCase(),
+                          );
+                        const patch: Partial<RenderSettings> = { backdrop: key };
+                        if (sunIsPresetDefault) patch.sunColor = theme.defaultSunHex;
+                        if (settings.fogSyncSky) {
+                          patch.fogColor = isCustom ? settings.customHorizonColor : theme.fogHex;
+                        } else if (
+                          settings.fogColor.toLowerCase() === prevTheme.fogHex.toLowerCase() ||
+                          Object.values(BACKDROP_THEMES).some(
+                            (t) => t.fogHex.toLowerCase() === settings.fogColor.toLowerCase(),
+                          )
+                        ) {
+                          patch.fogColor = isCustom ? settings.customHorizonColor : theme.fogHex;
+                        }
+                        onUpdateSettings(patch);
+                      }}
                       className={`flex items-center justify-between gap-1.5 px-2 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
                         active ? activeBtn : inactiveBtn
                       }`}
@@ -1094,9 +1116,21 @@ export function ControlSidebar({
                 <button
                   type="button"
                   aria-pressed={settings.autoRotate}
+                  // Turntable spin only orbits the camera, so it is disabled (rather
+                  // than silently ignored) while free cam is active.
+                  disabled={settings.cameraMode === 'free'}
+                  title={
+                    settings.cameraMode === 'free'
+                      ? 'Turntable spin works in orbit mode only — press F to leave free cam'
+                      : 'Slowly orbit the camera around the model'
+                  }
                   onClick={() => onUpdateSettings({ autoRotate: !settings.autoRotate })}
-                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors cursor-pointer ${
-                    settings.autoRotate ? activeBtn : inactiveBtn
+                  className={`px-2.5 py-1.5 rounded-md border text-[11px] font-medium transition-colors ${
+                    settings.cameraMode === 'free'
+                      ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
+                      : settings.autoRotate
+                        ? `${activeBtn} cursor-pointer`
+                        : `${inactiveBtn} cursor-pointer`
                   }`}
                 >
                   Turntable Spin

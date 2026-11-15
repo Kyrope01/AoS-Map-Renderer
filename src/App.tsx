@@ -132,7 +132,14 @@ export default function App() {
       setPickingLight(false);
       return;
     }
-    if (voxelLights.length >= MAX_VOXEL_LIGHTS) return;
+    if (voxelLights.length >= MAX_VOXEL_LIGHTS) {
+      // Without this the pick mode stays armed and clicks silently do nothing.
+      setPickingLight(false);
+      setErrorMsg(
+        `Maximum of ${MAX_VOXEL_LIGHTS} voxel lights reached. Remove one to add another.`,
+      );
+      return;
+    }
     const id =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
@@ -259,23 +266,33 @@ export default function App() {
     if (selectedX === undefined || selectedY === undefined || selectedZ === undefined) return;
     setSelectedScreenPos({ x: 0, y: 0, visible: false });
     let raf = 0;
-    const loop = () => {
-      const pos = viewportRef.current?.projectVoxelToScreen(
-        selectedX,
-        selectedY,
-        selectedZ,
-      );
-      if (pos) {
-        setSelectedScreenPos((prev) => {
-          if (
-            Math.abs(prev.x - pos.x) < 0.5 &&
-            Math.abs(prev.y - pos.y) < 0.5 &&
-            prev.visible === pos.visible
-          ) {
-            return prev;
-          }
-          return pos;
-        });
+    // The floating panel only needs to follow a *moving* camera. Projecting
+    // (which reads the canvas rect and clones a vector) on every single frame
+    // forever is wasted work, so throttle the probe and skip the state update
+    // unless the projected position actually changed.
+    let lastProjection = 0;
+    const PROBE_INTERVAL_MS = 50;
+
+    const loop = (now: number) => {
+      if (now - lastProjection >= PROBE_INTERVAL_MS) {
+        lastProjection = now;
+        const pos = viewportRef.current?.projectVoxelToScreen(
+          selectedX,
+          selectedY,
+          selectedZ,
+        );
+        if (pos) {
+          setSelectedScreenPos((prev) => {
+            if (
+              Math.abs(prev.x - pos.x) < 0.5 &&
+              Math.abs(prev.y - pos.y) < 0.5 &&
+              prev.visible === pos.visible
+            ) {
+              return prev;
+            }
+            return pos;
+          });
+        }
       }
       raf = window.requestAnimationFrame(loop);
     };
@@ -311,6 +328,7 @@ export default function App() {
         settings={settings}
         onFileDrop={(f) => void handleFileLoad(f)}
         onAdjustFlySpeed={(flySpeed) => updateSettings({ flySpeed })}
+        onDisableAutoRotate={() => updateSettings({ autoRotate: false })}
         voxelLights={voxelLights}
         pickingMode={pickingLight}
         onVoxelPicked={handleVoxelPicked}

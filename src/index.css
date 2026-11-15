@@ -28,14 +28,29 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Tactile studio range slider */
-input[type='range'].studio-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  outline: none;
-  cursor: pointer;
+/* Tactile studio range slider.
+   Kept in @layer components so Tailwind utilities such as `h-1.5` (used by the
+   colour pickers' hue/lightness sliders) can still override the default track
+   height; unlayered rules always beat layered utilities. */
+@layer components {
+  input[type='range'].studio-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+}
+
+/* Swatch rows scroll horizontally without a visible scrollbar. */
+.swatch-row {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.swatch-row::-webkit-scrollbar {
+  display: none;
 }
 
 input[type='range'].studio-slider::-webkit-slider-thumb {

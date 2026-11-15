@@ -90,6 +90,122 @@ test('vxl encode -> parse round-trip handles overhangs and multi-span columns', 
   assert.equal((botBridge >>> 16) & 0xff, 210);
 });
 
+test('vxl encode -> parse round-trip never invents voxels in all-air columns', () => {
+  const W = 4;
+  const D = 4;
+  const H = 16;
+  const voxels = new Uint32Array(W * D * H);
+  const set = (x: number, y: number, z: number, r: number, g: number, b: number) => {
+    voxels[(y * D + z) * W + x] = (0xff << 24) | (r << 16) | (g << 8) | b;
+  };
+
+  // Column (0, 0): completely empty.
+  // Column (1, 0): solid ground with an overhang and open air underneath it.
+  set(1, 0, 0, 103, 64, 40);
+  set(1, 4, 0, 200, 120, 50);
+  // Every other column keeps a normal crown so the map is not degenerate.
+  for (let z = 0; z < D; z++) {
+    for (let x = 0; x < W; x++) {
+      if ((x === 0 && z === 0) || (x === 1 && z === 0)) continue;
+      set(x, 0, z, 90, 140, 70);
+    }
+  }
+
+  const getVoxel = (gx: number, gy: number, gz: number) => voxels[(gy * D + gz) * W + gx];
+  const grid = parseVxl(encodeVxl(W, D, H, getVoxel), { width: W, depth: D, height: H });
+
+  for (let gy = 0; gy < H; gy++) {
+    for (let gz = 0; gz < D; gz++) {
+      for (let gx = 0; gx < W; gx++) {
+        assert.equal(
+          grid.isSolid(gx, gy, gz),
+          getVoxel(gx, gy, gz) !== 0,
+          `voxel (${gx}, ${gy}, ${gz}) should round-trip unchanged`,
+        );
+      }
+    }
+  }
+
+  // The air gap under the overhang stays empty, and the overhang survives.
+  assert.equal(grid.isSolid(1, 2, 0), false);
+  assert.equal(grid.isSolid(1, 4, 0), true);
+});
+
+test('vxl parser rejects bottom color runs longer than the column height', () => {
+  // numChunks = 20 with an empty top run claims 19 bottom colors in a 16-voxel column.
+  const buf = new Uint8Array([20, 0, 255, 0]);
+  assert.throws(
+    () => parseVxl(buf, { width: 1, depth: 1, height: 16 }),
+    VoxelParseError,
+  );
+});
+
+test('vxl parser rejects zero-sized dimensions instead of returning an empty grid', () => {
+  assert.throws(
+    () => parseVxl(new Uint8Array(16), { width: 0, depth: 4 }),
+    VoxelParseError,
+  );
+});
+
+test('vxl encoder never invents solidity in random columns (fuzz)', () => {
+  // Deterministic PRNG so a failure is reproducible.
+  let seed = 0x5eed1234;
+  const rnd = () => {
+    seed = (Math.imul(seed, 1103515245) + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+
+  for (const H of [5, 16, 64]) {
+    for (let trial = 0; trial < 25; trial++) {
+      const W = 4 + Math.floor(rnd() * 4);
+      const D = 4 + Math.floor(rnd() * 4);
+      const voxels = new Uint32Array(W * D * H);
+      const density = 0.2 + rnd() * 0.6;
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; z++) {
+          for (let x = 0; x < W; x++) {
+            if (rnd() < density * (y === 0 ? 1 : 0.65)) {
+              voxels[(y * D + z) * W + x] =
+                (0xff << 24) |
+                (((x * 40 + 7) & 0xff) << 16) |
+                (((y * 11 + 3) & 0xff) << 8) |
+                ((z * 70 + 5) & 0xff);
+            }
+          }
+        }
+      }
+
+      const get = (gx: number, gy: number, gz: number) => voxels[(gy * D + gz) * W + gx];
+      const grid = parseVxl(encodeVxl(W, D, H, get), { width: W, depth: D, height: H });
+
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; z++) {
+          for (let x = 0; x < W; x++) {
+            assert.equal(
+              grid.isSolid(x, y, z),
+              get(x, y, z) !== 0,
+              `solidity mismatch at (${x}, ${y}, ${z}) in a ${W}×${D}×${H} map (trial ${trial})`,
+            );
+          }
+        }
+      }
+      let solidCount = 0;
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; z++) {
+          for (let x = 0; x < W; x++) if (get(x, y, z) !== 0) solidCount++;
+        }
+      }
+      let reportedCount = 0;
+      for (let y = 0; y < H; y++) {
+        for (let z = 0; z < D; z++) {
+          for (let x = 0; x < W; x++) if (grid.isSolid(x, y, z)) reportedCount++;
+        }
+      }
+      assert.equal(reportedCount, solidCount, 'parsed solid count must match the source map');
+    }
+  }
+});
+
 test('vxl parser detects border water color when exposed gy=0 water exists', () => {
   const W = 16;
   const D = 16;
@@ -206,3 +322,43 @@ test('export tiling covers full target dimensions without gaps or overflow', () 
   assert.deepEqual(tiles[tiles.length - 1], { x: 4096, y: 2048, width: 904, height: 952 });
 });
 
+
+test('kv6 sparse hash path keeps every voxel in volumes above the dense threshold', () => {
+  // 256×256×256 = 16.7M voxels > 8M, so parseKv6 uses the open-addressed table.
+  const X = 256;
+  const Y = 256;
+  const Z = 256;
+  const voxels = [
+    { x: 0, y: 0, z: 0, r: 10, g: 20, b: 30 },
+    { x: X - 1, y: Y - 1, z: Z - 1, r: 200, g: 150, b: 100 },
+    { x: 17, y: 200, z: 3, r: 7, g: 8, b: 9 },
+  ];
+  const buf = encodeKv6(X, Y, Z, voxels);
+  const grid = parseKv6(buf);
+
+  assert.equal(grid.voxelCount, 3);
+  for (const voxel of voxels) {
+    const gy = Z - 1 - voxel.z;
+    const color = grid.getColor(voxel.x, gy, voxel.y);
+    assert.deepEqual(
+      [(color >>> 16) & 0xff, (color >>> 8) & 0xff, color & 0xff],
+      [voxel.r, voxel.g, voxel.b],
+      `sparse voxel ${voxel.x},${voxel.y},${voxel.z} should survive the round-trip`,
+    );
+  }
+
+  const visited: string[] = [];
+  grid.forEachSolid?.((x, y, z) => visited.push(`${x},${y},${z}`));
+  assert.equal(visited.length, 3);
+});
+
+test('kv6 voxelCount ignores skipped and duplicate voxels', () => {
+  const buf = encodeKv6(4, 4, 4, [
+    { x: 1, y: 1, z: 1, r: 1, g: 2, b: 3 },
+    { x: 1, y: 1, z: 1, r: 9, g: 9, b: 9 }, // duplicate cell, last wins
+  ]);
+  const grid = parseKv6(buf);
+  assert.equal(grid.voxelCount, 1);
+  // Packed colors are unsigned once stored in a Uint32Array.
+  assert.equal(grid.getColor(1, 2, 1) >>> 0, (0xff000000 | (9 << 16) | (9 << 8) | 9) >>> 0);
+});
