@@ -6,6 +6,8 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  GodRaysCompositeShader,
+  GodRaysShader,
   MAX_VOXEL_SHADOW_CASTERS,
   StudioPostShader,
 } from './shaders';
@@ -107,6 +109,8 @@ test('shaders never use reversed smoothstep edges (spec-undefined)', () => {
     resolveIncludes(sky.fragmentShader),
     resolveIncludes(ocean.material.fragmentShader),
     StudioPostShader.fragmentShader,
+    GodRaysShader.fragmentShader,
+    GodRaysCompositeShader.fragmentShader,
   ];
   sky.dispose();
   ocean.material.dispose();
@@ -187,3 +191,13 @@ test('sortVoxelLightsByIntensity prioritizes brightest lights first without muta
     ['dim', 'bright', 'mid'],
   );
 });
+
+test('volumetric GodRaysShader marches 3D shadow map with IGN jitter and omnidirectional phase', () => {
+  assert.match(GodRaysShader.fragmentShader, /uniform highp sampler2DShadow uShadowMap;/);
+  assert.match(GodRaysShader.fragmentShader, /uniform mat4 uShadowMatrix;/);
+  assert.match(GodRaysShader.fragmentShader, /52\.9829189/); // Interleaved Gradient Noise jitter
+  assert.doesNotMatch(GodRaysShader.fragmentShader, /uLightPos/); // No 2D screen-space radial smear
+  assert.match(GodRaysCompositeShader.fragmentShader, /uniform sampler2D tRays;/);
+  assert.match(GodRaysCompositeShader.fragmentShader, /depthSigma/);
+});
+

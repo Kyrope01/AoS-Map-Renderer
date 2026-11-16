@@ -1,13 +1,15 @@
-import { Copy, Crosshair, Move, Trash2, User, X } from 'lucide-react';
+import { Copy, Crosshair, Move, Skull, Trash2, User, X } from 'lucide-react';
 import { RefObject } from 'react';
 import {
+  DEFAULT_ZOMBIE_CLOTH_COLOR,
   PLAYER_BLOCK_SWATCHES,
+  PLAYER_CHARACTER_OPTIONS,
   PLAYER_STANCE_OPTIONS,
   PLAYER_STYLE_OPTIONS,
   PLAYER_TEAM_SWATCHES,
   PLAYER_WEAPON_OPTIONS,
 } from '../voxel/playerModel';
-import { SpawnedPlayer } from '../voxel/types';
+import { PlayerWeapon, SpawnedPlayer } from '../voxel/types';
 import {
   computeFloatingPanelCoords,
   PLAYER_PANEL_GAP,
@@ -16,6 +18,12 @@ import {
 } from './floatingAnchor';
 
 export { PLAYER_PANEL_GAP, PLAYER_PANEL_W };
+
+const TACTICAL_CORPSE_CLASS_OPTIONS: readonly { id: PlayerWeapon; label: string }[] = [
+  { id: 'rifle', label: 'Rifle' },
+  { id: 'shotgun', label: 'Shotgun' },
+  { id: 'smg', label: 'SMG' },
+];
 
 interface PlayerModelPanelProps {
   player: SpawnedPlayer;
@@ -78,7 +86,7 @@ function PanelSlider({
 }
 
 /**
- * Floating player-model editor anchored cleanly beside the selected ZeroSpades player
+ * Floating player/zombie/corpse editor anchored cleanly beside the selected model
  * in the 3D viewport. Updated via GPU-composited `translate3d` on every WebGL frame
  * so camera orbits and Free Cam movement stay silky smooth.
  */
@@ -95,7 +103,9 @@ export function PlayerModelPanel({
   onRemove,
   onClose,
 }: PlayerModelPanelProps) {
-  const estHeight = player.weapon === 'block' ? 470 : 424;
+  const isZombie = player.characterType === 'zombie';
+  const isCorpse = player.stance === 'corpse';
+  const estHeight = !isZombie && !isCorpse && player.weapon === 'block' ? 500 : 454;
   const { left, top } = computeFloatingPanelCoords(
     initialScreenPos.x,
     initialScreenPos.y,
@@ -109,6 +119,17 @@ export function PlayerModelPanel({
   const inactiveBtn =
     'text-[#A6AEBC] hover:text-[#F3F1EC] hover:bg-white/7 border-white/10';
   const activeBtn = 'bg-[#E05A2B] text-white border-[#E05A2B]';
+
+  const headerTitle = isCorpse
+    ? isZombie
+      ? 'Zombie Corpse'
+      : 'Player Corpse'
+    : isZombie
+      ? 'Zombie Model'
+      : 'Player Model';
+
+  const tacticalCorpseClass: PlayerWeapon =
+    player.weapon === 'shotgun' || player.weapon === 'smg' ? player.weapon : 'rifle';
 
   return (
     <div
@@ -127,8 +148,12 @@ export function PlayerModelPanel({
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <User className="w-3.5 h-3.5 text-[#E05A2B] shrink-0" aria-hidden="true" />
-            <span className="text-xs font-semibold tracking-tight">Player Model</span>
+            {isZombie || isCorpse ? (
+              <Skull className="w-3.5 h-3.5 text-[#E05A2B] shrink-0" aria-hidden="true" />
+            ) : (
+              <User className="w-3.5 h-3.5 text-[#E05A2B] shrink-0" aria-hidden="true" />
+            )}
+            <span className="text-xs font-semibold tracking-tight">{headerTitle}</span>
           </div>
           <span className="font-mono-tabular text-[10px] text-[#8F98A6] block mt-0.5">
             {player.x.toFixed(1)}, {player.y.toFixed(1)}, {player.z.toFixed(1)} · drag model to move
@@ -144,12 +169,52 @@ export function PlayerModelPanel({
         </button>
       </div>
 
-      {/* Stance / Position */}
+      {/* Character Type (Player vs Zombie) */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-[#B8C0CC]">Character</span>
+        <div className="grid grid-cols-2 gap-1">
+          {PLAYER_CHARACTER_OPTIONS.map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              aria-pressed={player.characterType === opt.id}
+              onClick={() => {
+                if (opt.id === player.characterType) return;
+                if (opt.id === 'zombie') {
+                  onUpdate(player.id, {
+                    characterType: 'zombie',
+                    weapon: 'spade',
+                    teamColor:
+                      player.teamColor.toUpperCase() === '#2B6CB0'
+                        ? DEFAULT_ZOMBIE_CLOTH_COLOR
+                        : player.teamColor,
+                  });
+                } else {
+                  onUpdate(player.id, {
+                    characterType: 'player',
+                    teamColor:
+                      player.teamColor.toUpperCase() === DEFAULT_ZOMBIE_CLOTH_COLOR
+                        ? '#2B6CB0'
+                        : player.teamColor,
+                  });
+                }
+              }}
+              className={`px-2.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                player.characterType === opt.id ? activeBtn : inactiveBtn
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Stance / Position (including Corpse) */}
       <div className="space-y-1">
         <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#8F98A6]">
-          Position
+          State / Position
         </span>
-        <div className="grid grid-cols-3 gap-1">
+        <div className="grid grid-cols-2 gap-1">
           {PLAYER_STANCE_OPTIONS.map((opt) => (
             <button
               key={opt.id}
@@ -166,51 +231,88 @@ export function PlayerModelPanel({
         </div>
       </div>
 
-      {/* Weapon / Tool */}
-      <div className="space-y-1">
-        <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#8F98A6]">
-          Held Weapon / Tool
+      {/* Weapon / Tool (live models) */}
+      {!isCorpse && (
+        <div className="space-y-1">
+          <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#8F98A6]">
+            Held Weapon / Tool
+          </span>
+          {isZombie ? (
+            <div className="flex items-center justify-between px-2.5 py-1.5 rounded border border-[#E05A2B]/40 bg-[#E05A2B]/12 text-[11px]">
+              <span className="font-semibold text-[#F3F1EC]">Spade</span>
+              <span className="text-[10px] text-[#B8C0CC]">Zombies always hold spades</span>
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-1">
+              {PLAYER_WEAPON_OPTIONS.map((opt) => (
+                <button
+                  key={opt.id}
+                  type="button"
+                  aria-pressed={player.weapon === opt.id}
+                  onClick={() => onUpdate(player.id, { weapon: opt.id })}
+                  className={`px-2 py-1 rounded border text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
+                    player.weapon === opt.id ? activeBtn : inactiveBtn
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Uniform Style (Human players & human corpses) */}
+      {!isZombie && (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium text-[#B8C0CC]">Gear Style</span>
+          <div className="grid grid-cols-2 gap-1">
+            {PLAYER_STYLE_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                aria-pressed={player.style === opt.id}
+                onClick={() => onUpdate(player.id, { style: opt.id })}
+                className={`px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+                  player.style === opt.id ? activeBtn : inactiveBtn
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Tactical Corpse Class (Rifle / Shotgun / SMG Dead.kv6) */}
+      {!isZombie && isCorpse && player.style === 'tactical' && (
+        <div className="space-y-1">
+          <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#8F98A6]">
+            Corpse Class
+          </span>
+          <div className="grid grid-cols-3 gap-1">
+            {TACTICAL_CORPSE_CLASS_OPTIONS.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                aria-pressed={tacticalCorpseClass === opt.id}
+                onClick={() => onUpdate(player.id, { weapon: opt.id })}
+                className={`px-2 py-1 rounded border text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
+                  tacticalCorpseClass === opt.id ? activeBtn : inactiveBtn
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Team / Clothing Color */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-[#B8C0CC]">
+          {isZombie ? 'Cloth Color' : 'Team Color'}
         </span>
-        <div className="grid grid-cols-3 gap-1">
-          {PLAYER_WEAPON_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              aria-pressed={player.weapon === opt.id}
-              onClick={() => onUpdate(player.id, { weapon: opt.id })}
-              className={`px-2 py-1 rounded border text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
-                player.weapon === opt.id ? activeBtn : inactiveBtn
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Uniform Style */}
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-medium text-[#B8C0CC]">Gear Style</span>
-        <div className="grid grid-cols-2 gap-1">
-          {PLAYER_STYLE_OPTIONS.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              aria-pressed={player.style === opt.id}
-              onClick={() => onUpdate(player.id, { style: opt.id })}
-              className={`px-2 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
-                player.style === opt.id ? activeBtn : inactiveBtn
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Team Color */}
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-[11px] font-medium text-[#B8C0CC]">Team Color</span>
         <div className="flex items-center gap-1.5">
           {PLAYER_TEAM_SWATCHES.map((sw) => (
             <button
@@ -238,8 +340,8 @@ export function PlayerModelPanel({
         </div>
       </div>
 
-      {/* Block Color (shown whenever Block tool is held) */}
-      {player.weapon === 'block' && (
+      {/* Block Color (shown whenever a live human player holds the Block tool) */}
+      {!isZombie && !isCorpse && player.weapon === 'block' && (
         <div className="flex items-center justify-between gap-2 pt-0.5 border-t border-white/8">
           <span className="text-[11px] font-medium text-[#B8C0CC]">Block Color</span>
           <div className="flex items-center gap-1.5">
@@ -282,16 +384,18 @@ export function PlayerModelPanel({
           displayValue={`${Math.round(player.yaw)}°`}
           onChange={(v) => onUpdate(player.id, { yaw: v })}
         />
-        <PanelSlider
-          id="player-pitch-slider"
-          label="Aim Pitch"
-          value={player.pitch}
-          min={-45}
-          max={45}
-          step={1}
-          displayValue={`${player.pitch > 0 ? '+' : ''}${Math.round(player.pitch)}°`}
-          onChange={(v) => onUpdate(player.id, { pitch: v })}
-        />
+        {!isCorpse && (
+          <PanelSlider
+            id="player-pitch-slider"
+            label="Aim Pitch"
+            value={player.pitch}
+            min={-45}
+            max={45}
+            step={1}
+            displayValue={`${player.pitch > 0 ? '+' : ''}${Math.round(player.pitch)}°`}
+            onChange={(v) => onUpdate(player.id, { pitch: v })}
+          />
+        )}
       </div>
 
       {/* Placement helpers: Move on Map + Snap to Ground */}
@@ -303,7 +407,7 @@ export function PlayerModelPanel({
           className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${
             isMovingOnMap ? activeBtn : inactiveBtn
           }`}
-          title="Click anywhere on the map to move this player there"
+          title="Click anywhere on the map to move this model there"
         >
           <Move className="w-3 h-3 shrink-0" aria-hidden="true" />
           <span>{isMovingOnMap ? 'Click Map…' : 'Move on Map'}</span>
@@ -312,7 +416,7 @@ export function PlayerModelPanel({
           type="button"
           onClick={() => onSnapToGround(player.id)}
           className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded border text-[11px] font-medium whitespace-nowrap transition-colors cursor-pointer ${inactiveBtn}`}
-          title="Drop player feet directly onto top solid block below"
+          title="Drop model directly onto top solid block below"
         >
           <Crosshair className="w-3 h-3 shrink-0" aria-hidden="true" />
           <span>Snap Ground</span>
@@ -330,7 +434,7 @@ export function PlayerModelPanel({
               ? 'border-[#E05A2B]/50 bg-[#E05A2B]/15 text-[#F3F1EC] hover:bg-[#E05A2B]/25 cursor-pointer'
               : 'border-white/10 text-[#6B7280] cursor-not-allowed'
           }`}
-          title="Duplicate this player with all current pose, weapon, and color settings"
+          title="Duplicate this model with all current pose, weapon, and color settings"
         >
           <Copy className="w-3 h-3 shrink-0" aria-hidden="true" />
           <span>Duplicate</span>

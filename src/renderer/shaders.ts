@@ -1330,14 +1330,188 @@ export const StudioPostShader = {
   `,
 };
 
+/**
+ * True 3D Volumetric Shadow-Map God Rays (Stage 1: Raymarch).
+ *
+ * Instead of 2D screen-space radial smearing (which stamps discrete ghosted
+ * rectangles of bright windows and vanishes whenever the sun leaves the camera
+ * frustum), this shader reconstructs each pixel's 3D world ray from `tDepth`
+ * and integrates directional shadow-map visibility (`uShadowMap`) along the
+ * continuous 3D ray with Interleaved Gradient Noise (IGN) jitter.
+ *
+ * Consequently:
+ *  - Beams streaming out of building windows, arches, and bridge trusses are
+ *    genuinely 3D and stay visible from ANY camera look direction (including
+ *    looking sideways or with the sun behind the camera).
+ *  - IGN sub-step jitter + Stage 2 depth-aware bilateral filtering eliminates
+ *    stepped/rectangular banding completely.
+ */
 export const GodRaysShader = {
   uniforms: {
-    tDiffuse: { value: null as THREE.Texture | null },
-    uLightPos: { value: new THREE.Vector2(0.5, 0.5) },
-    uSunColor: { value: new THREE.Color('#ffffff') },
+    tDepth: { value: null as THREE.Texture | null },
+    uShadowMap: { value: null as THREE.Texture | null },
+    uShadowMatrix: { value: new THREE.Matrix4() },
+    uInvProjectionMatrix: { value: new THREE.Matrix4() },
+    uCameraMatrixWorld: { value: new THREE.Matrix4() },
+    uLightDir: { value: new THREE.Vector3(0.5, 0.7, 0.5) },
+    uSunColor: { value: new THREE.Color('#FFF7E2') },
+    uVolumeMin: { value: new THREE.Vector3(-320, -2, -320) },
+    uVolumeMax: { value: new THREE.Vector3(320, 108, 320) },
+    uGroundY: { value: 0.0 },
+    uHeightFalloff: { value: 0.022 },
+    uMaxDistance: { value: 440.0 },
+    uShaftRadiusUv: { value: new THREE.Vector2(0.012, 0.03) },
+    uShadowDepthBias: { value: 0.0003 },
     uIntensity: { value: 0.65 },
-    uSamples: { value: 16 },
-    uVisibility: { value: 1.0 },
+    uSamples: { value: 48 },
+    uShadowReady: { value: 0.0 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDepth;
+    uniform highp sampler2DShadow uShadowMap;
+    uniform mat4 uShadowMatrix;
+    uniform mat4 uInvProjectionMatrix;
+    uniform mat4 uCameraMatrixWorld;
+    uniform vec3 uLightDir;
+    uniform vec3 uSunColor;
+    uniform vec3 uVolumeMin;
+    uniform vec3 uVolumeMax;
+    uniform float uGroundY;
+    uniform float uHeightFalloff;
+    uniform float uMaxDistance;
+    uniform vec2 uShaftRadiusUv;
+    uniform float uShadowDepthBias;
+    uniform float uIntensity;
+    uniform int uSamples;
+    uniform float uShadowReady;
+    varying vec2 vUv;
+
+    void main() {
+      float rawDepth = texture(tDepth, vUv).r;
+      vec2 ndc = vUv * 2.0 - 1.0;
+
+      vec4 nearView = uInvProjectionMatrix * vec4(ndc, -1.0, 1.0);
+      nearView /= nearView.w;
+      vec3 rayStart = (uCameraMatrixWorld * nearView).xyz;
+
+      vec4 farView = uInvProjectionMatrix * vec4(ndc, rawDepth * 2.0 - 1.0, 1.0);
+      farView /= farView.w;
+      vec3 worldHit = (uCameraMatrixWorld * farView).xyz;
+
+      vec3 rayVec = worldHit - rayStart;
+      float sceneDist = length(rayVec);
+
+      if (uIntensity <= 0.001 || uShadowReady < 0.5 || uSamples <= 0) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, sceneDist);
+        return;
+      }
+
+      vec3 rayDir = rayVec / max(sceneDist, 1e-4);
+
+      vec3 safeDir = vec3(
+        abs(rayDir.x) > 1e-5 ? rayDir.x : 1e-5,
+        abs(rayDir.y) > 1e-5 ? rayDir.y : 1e-5,
+        abs(rayDir.z) > 1e-5 ? rayDir.z : 1e-5
+      );
+      vec3 tLow = (uVolumeMin - rayStart) / safeDir;
+      vec3 tHigh = (uVolumeMax - rayStart) / safeDir;
+      vec3 tMin3 = min(tLow, tHigh);
+      vec3 tMax3 = max(tLow, tHigh);
+
+      float tEnter = max(0.0, max(tMin3.x, max(tMin3.y, tMin3.z)));
+      float geomStop = rawDepth >= 0.99995 ? uMaxDistance : max(0.0, sceneDist - 0.14);
+      float tExit = min(min(geomStop, uMaxDistance), min(tMax3.x, min(tMax3.y, tMax3.z)));
+
+      if (tExit <= tEnter + 0.05) {
+        gl_FragColor = vec4(0.0, 0.0, 0.0, sceneDist);
+        return;
+      }
+
+      float marchLen = tExit - tEnter;
+      float dt = marchLen / float(uSamples);
+
+      // Interleaved Gradient Noise jitter breaks up discrete ray steps completely
+      float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+      float phi = ign * 6.2831853;
+      vec2 axisA = vec2(cos(phi), sin(phi));
+      vec2 axisB = vec2(-axisA.y, axisA.x);
+
+      // Isotropic/Rayleigh floor keeps 3D shafts visible from any angle (including
+      // beams going out of windows away from the camera), plus gentle Mie forward glow.
+      float cosTheta = dot(rayDir, uLightDir);
+      float g = 0.46;
+      float hgDenom = max(0.16, 1.0 + g * g - 2.0 * g * cosTheta);
+      float hg = (1.0 - g * g) / (hgDenom * sqrt(hgDenom));
+      float phase = 0.62 + 0.20 * min(hg, 2.6);
+
+      vec2 rNear = axisA * uShaftRadiusUv;
+      vec2 rWide = axisB * (uShaftRadiusUv * 2.5);
+
+      float accumShaft = 0.0;
+      float accumBase = 0.0;
+
+      for (int i = 0; i < 160; i++) {
+        if (i >= uSamples) break;
+        float t = tEnter + (float(i) + ign) * dt;
+        vec3 pos = rayStart + rayDir * t;
+
+        vec4 sc = uShadowMatrix * vec4(pos, 1.0);
+        if (sc.x > 0.002 && sc.x < 0.998 && sc.y > 0.002 && sc.y < 0.998 && sc.z > 0.0 && sc.z < 0.9995) {
+          float zRef = sc.z - uShadowDepthBias;
+          float lit = texture(uShadowMap, vec3(sc.xy, zRef));
+          if (lit > 0.01) {
+            float heightDensity = exp(-max(0.0, pos.y - uGroundY) * uHeightFalloff);
+            float distAtten = exp(-t * 0.0036);
+            float localWeight = lit * heightDensity * distAtten * dt;
+
+            // Compare against surrounding shadow-map texels perpendicular to the sun
+            // beam so genuine crepuscular shafts (beams framed by windows, arches,
+            // trusses, and rooflines) stand out naturally without washing out open sky.
+            float surr = 0.25 * (
+              texture(uShadowMap, vec3(clamp(sc.xy + rNear, 0.001, 0.999), zRef)) +
+              texture(uShadowMap, vec3(clamp(sc.xy - rNear, 0.001, 0.999), zRef)) +
+              texture(uShadowMap, vec3(clamp(sc.xy + rWide, 0.001, 0.999), zRef)) +
+              texture(uShadowMap, vec3(clamp(sc.xy - rWide, 0.001, 0.999), zRef))
+            );
+            float shaftContrast = smoothstep(0.04, 0.72, 1.0 - surr);
+
+            accumShaft += localWeight * shaftContrast;
+            accumBase += localWeight * (1.0 - shaftContrast);
+          }
+        }
+      }
+
+      float opticalScatter = (accumShaft * 0.028 + accumBase * 0.00028) * phase * uIntensity;
+      float radiance = 1.0 - exp(-opticalScatter);
+      vec3 rays = uSunColor * (radiance * 0.72);
+
+      gl_FragColor = vec4(rays, sceneDist);
+    }
+  `,
+};
+
+/**
+ * True 3D Volumetric God Rays (Stage 2: Depth-Aware 5×5 Bilateral Composite).
+ *
+ * Smooths the IGN-jittered volumetric buffer into silky, noise-free shafts while
+ * respecting full-resolution scene depth discontinuities so foreground silhouettes
+ * (players, zombies, vehicles, window frames) remain razor-sharp.
+ */
+export const GodRaysCompositeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    tDepth: { value: null as THREE.Texture | null },
+    tRays: { value: null as THREE.Texture | null },
+    uRaysTexelSize: { value: new THREE.Vector2(1 / 960, 1 / 540) },
+    uInvProjectionMatrix: { value: new THREE.Matrix4() },
+    uCameraMatrixWorld: { value: new THREE.Matrix4() },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -1348,40 +1522,60 @@ export const GodRaysShader = {
   `,
   fragmentShader: /* glsl */ `
     uniform sampler2D tDiffuse;
-    uniform vec2 uLightPos;
-    uniform vec3 uSunColor;
-    uniform float uIntensity;
-    uniform int uSamples;
-    uniform float uVisibility;
+    uniform sampler2D tDepth;
+    uniform sampler2D tRays;
+    uniform vec2 uRaysTexelSize;
+    uniform mat4 uInvProjectionMatrix;
+    uniform mat4 uCameraMatrixWorld;
     varying vec2 vUv;
 
     void main() {
-      vec4 base = texture2D(tDiffuse, vUv);
-      if (uIntensity <= 0.001 || uVisibility <= 0.001 || uSamples <= 0) {
-        gl_FragColor = base;
-        return;
-      }
+      vec4 base = texture(tDiffuse, vUv);
+      float rawDepth = texture(tDepth, vUv).r;
+      vec2 ndc = vUv * 2.0 - 1.0;
 
-      vec2 coord = vUv;
-      vec2 delta = (vUv - uLightPos) * (0.92 / float(uSamples));
-      vec3 accum = vec3(0.0);
-      float illuminationDecay = 1.0;
+      vec4 nearView = uInvProjectionMatrix * vec4(ndc, -1.0, 1.0);
+      nearView /= nearView.w;
+      vec3 rayStart = (uCameraMatrixWorld * nearView).xyz;
 
-      for (int i = 0; i < 96; i++) {
-        if (i >= uSamples) break;
-        coord -= delta;
-        if (coord.x >= 0.0 && coord.x <= 1.0 && coord.y >= 0.0 && coord.y <= 1.0) {
-          vec3 s = texture2D(tDiffuse, coord).rgb;
-          float lum = dot(s, vec3(0.2126, 0.7152, 0.0722));
-          float bright = smoothstep(0.42, 1.15, lum);
-          accum += s * bright * illuminationDecay;
+      vec4 farView = uInvProjectionMatrix * vec4(ndc, rawDepth * 2.0 - 1.0, 1.0);
+      farView /= farView.w;
+      vec3 worldHit = (uCameraMatrixWorld * farView).xyz;
+
+      float centerDist = length(worldHit - rayStart);
+      float depthSigma = max(1.8, centerDist * 0.08);
+
+      vec2 raysSize = vec2(1.0) / max(uRaysTexelSize, vec2(1e-6));
+      vec2 uvTexel = vUv * raysSize;
+      vec2 centerTexel = floor(uvTexel) + 0.5;
+      vec2 minUv = uRaysTexelSize * 0.5;
+      vec2 maxUv = vec2(1.0) - minUv;
+
+      vec3 accumRays = vec3(0.0);
+      float weightSum = 0.0;
+      vec3 fallbackRays = texture(tRays, clamp(centerTexel * uRaysTexelSize, minUv, maxUv)).rgb;
+
+      for (int dy = -2; dy <= 2; dy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+          vec2 sampleTexel = centerTexel + vec2(float(dx), float(dy));
+          vec2 sampleUv = clamp(sampleTexel * uRaysTexelSize, minUv, maxUv);
+          vec4 tap = texture(tRays, sampleUv);
+          vec2 diff = sampleTexel - uvTexel;
+          float spatialW = exp(-0.42 * dot(diff, diff));
+          float depthW = exp(-abs(tap.a - centerDist) / depthSigma);
+          float w = spatialW * depthW;
+          accumRays += tap.rgb * w;
+          weightSum += w;
         }
-        illuminationDecay *= 0.965;
       }
 
-      vec3 rays = (accum / float(uSamples)) * uIntensity * uVisibility * uSunColor;
-      gl_FragColor = vec4(base.rgb + rays, base.a);
+      vec3 filteredRays = weightSum > 1e-4 ? (accumRays / weightSum) : fallbackRays;
+      float baseLum = dot(base.rgb, vec3(0.2126, 0.7152, 0.0722));
+      float highlightGuard = 1.0 - 0.55 * smoothstep(0.75, 1.85, baseLum);
+
+      gl_FragColor = vec4(base.rgb + filteredRays * highlightGuard, base.a);
     }
   `,
 };
+
 

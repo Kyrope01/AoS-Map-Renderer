@@ -11,9 +11,11 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { BuiltVoxelMesh } from '../voxel/mesher';
 import {
+  computeCorpseTransform,
   computePlayerPoseTransforms,
   disposePlayerModelGeometryCache,
   getPlayerPartGeometry,
+  PLAYER_PART_EULER_ORDER,
   prunePlayerModelGeometryCache,
   selectPlayerPartKeys,
 } from '../voxel/playerModel';
@@ -46,10 +48,10 @@ import {
   MAX_VOXEL_SHADOW_CASTERS,
   SharedShaderUniforms,
   StudioPostShader,
-  GodRaysShader,
   syncSharedUniforms,
 } from './shaders';
 import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
+import { VolumetricGodRaysPass } from './volumetricGodRaysPass';
 
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
@@ -300,7 +302,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
       renderer.setSize(width, height);
       renderer.shadowMap.enabled = !isSoftwareGl;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.needsUpdate = true;
       renderer.domElement.style.display = 'block';
@@ -387,8 +389,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       const keyLight = new THREE.DirectionalLight(settingsRef.current.sunColor, 1.3);
       keyLight.castShadow = !isSoftwareGl;
-      keyLight.shadow.mapSize.width = 2048;
-      keyLight.shadow.mapSize.height = 2048;
+      const shadowMapRes = isSoftwareGl
+        ? 1024
+        : Math.min(4096, renderer.capabilities.maxTextureSize || 4096);
+      keyLight.shadow.mapSize.width = shadowMapRes;
+      keyLight.shadow.mapSize.height = shadowMapRes;
       keyLight.shadow.bias = -0.0005;
       keyLight.shadow.normalBias = 0.02;
       scene.add(keyLight);
@@ -672,6 +677,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         armsPivot: THREE.Group;
         armsMesh: THREE.Mesh;
         toolMesh: THREE.Mesh;
+        corpseMesh: THREE.Mesh;
         poseSig: string;
         geoSig: string;
         x: number;
@@ -719,10 +725,19 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         mesh.castShadow = !isSoftwareGl;
         mesh.receiveShadow = !isSoftwareGl;
         mesh.position.set(pos[0], pos[1], pos[2]);
-        mesh.rotation.set(rotX, rotY, 0, 'YXZ');
+        mesh.rotation.set(rotX, rotY, 0, PLAYER_PART_EULER_ORDER);
         mesh.scale.setScalar(scale);
         mesh.userData.playerId = playerId;
         return mesh;
+      };
+
+      const setPlayerCorpseVisibility = (rec: RenderedPlayerRecord, isCorpse: boolean) => {
+        rec.corpseMesh.visible = isCorpse;
+        rec.legLeftMesh.visible = !isCorpse;
+        rec.legRightMesh.visible = !isCorpse;
+        rec.torsoMesh.visible = !isCorpse;
+        rec.headMesh.visible = !isCorpse;
+        rec.armsPivot.visible = !isCorpse;
       };
 
       const syncPlayers = () => {
@@ -750,13 +765,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
         for (const p of players) {
           activeIds.add(p.id);
-          const geoSig = `${p.style}|${p.stance}|${p.teamColor}|${p.weapon === 'block' ? p.blockColor : p.weapon}`;
-          const poseSig = `${p.stance}|${p.weapon}|${p.pitch}`;
+          const characterType = p.characterType ?? 'player';
+          const effectiveWeapon = characterType === 'zombie' ? 'spade' : p.weapon;
+          const isCorpse = p.stance === 'corpse';
+          const geoSig = `${characterType}|${p.style}|${p.stance}|${p.teamColor}|${effectiveWeapon === 'block' ? p.blockColor : effectiveWeapon}`;
+          const poseSig = `${characterType}|${p.style}|${p.stance}|${effectiveWeapon}|${p.pitch}`;
           let rec = renderedPlayers.get(p.id);
 
           if (!rec) {
-            const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
-            const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+            const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
+            const pose = computePlayerPoseTransforms(p.stance, effectiveWeapon, p.pitch);
+            const corpsePose = computeCorpseTransform(parts.corpse);
             const root = new THREE.Group();
             root.name = `player-${p.id}`;
             root.userData.playerId = p.id;
@@ -816,7 +835,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               pose.arms.scale,
             );
             const toolGeo =
-              p.weapon === 'block'
+              effectiveWeapon === 'block'
                 ? getPlayerPartGeometry(parts.tool, p.blockColor)
                 : getPlayerPartGeometry(parts.tool);
             const toolMesh = makePlayerPartMesh(
@@ -829,7 +848,18 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               pose.toolInArms.scale,
             );
             armsPivot.add(armsMesh, toolMesh);
-            root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot);
+
+            const corpseMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.corpse, p.teamColor),
+              p.id,
+              activeMat,
+              corpsePose.position,
+              corpsePose.rotationX,
+              corpsePose.rotationY,
+              corpsePose.scale,
+            );
+
+            root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot, corpseMesh);
             playersGroup.add(root);
 
             rec = {
@@ -841,6 +871,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               armsPivot,
               armsMesh,
               toolMesh,
+              corpseMesh,
               poseSig,
               geoSig,
               x: p.x,
@@ -849,6 +880,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               yaw: p.yaw,
               pitch: p.pitch,
             };
+            setPlayerCorpseVisibility(rec, isCorpse);
             renderedPlayers.set(p.id, rec);
             geometryOrTransformChanged = true;
           } else {
@@ -865,32 +897,60 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               geometryOrTransformChanged = true;
             }
             if (rec.geoSig !== geoSig) {
-              const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
+              const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
               rec.legLeftMesh.geometry = getPlayerPartGeometry(parts.legLeft, p.teamColor);
               rec.legRightMesh.geometry = getPlayerPartGeometry(parts.legRight, p.teamColor);
               rec.torsoMesh.geometry = getPlayerPartGeometry(parts.torso, p.teamColor);
               rec.headMesh.geometry = getPlayerPartGeometry(parts.head, p.teamColor);
               rec.armsMesh.geometry = getPlayerPartGeometry(parts.arms, p.teamColor);
               rec.toolMesh.geometry =
-                p.weapon === 'block'
+                effectiveWeapon === 'block'
                   ? getPlayerPartGeometry(parts.tool, p.blockColor)
                   : getPlayerPartGeometry(parts.tool);
+              rec.corpseMesh.geometry = getPlayerPartGeometry(parts.corpse, p.teamColor);
+              const corpsePose = computeCorpseTransform(parts.corpse);
+              rec.corpseMesh.position.set(...corpsePose.position);
+              rec.corpseMesh.rotation.set(
+                corpsePose.rotationX,
+                corpsePose.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.geoSig = geoSig;
               geometryOrTransformChanged = true;
             }
             if (rec.poseSig !== poseSig) {
-              const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+              const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
+              const pose = computePlayerPoseTransforms(p.stance, effectiveWeapon, p.pitch);
+              const corpsePose = computeCorpseTransform(parts.corpse);
               rec.legLeftMesh.position.set(...pose.legLeft.position);
-              rec.legLeftMesh.rotation.set(pose.legLeft.rotationX, pose.legLeft.rotationY, 0, 'YXZ');
+              rec.legLeftMesh.rotation.set(
+                pose.legLeft.rotationX,
+                pose.legLeft.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.legRightMesh.position.set(...pose.legRight.position);
-              rec.legRightMesh.rotation.set(pose.legRight.rotationX, pose.legRight.rotationY, 0, 'YXZ');
+              rec.legRightMesh.rotation.set(
+                pose.legRight.rotationX,
+                pose.legRight.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.torsoMesh.position.set(...pose.torso.position);
               rec.headMesh.position.set(...pose.head.position);
-              rec.headMesh.rotation.set(pose.head.rotationX, pose.head.rotationY, 0, 'YXZ');
+              rec.headMesh.rotation.set(
+                pose.head.rotationX,
+                pose.head.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.armsPivot.position.set(...pose.arms.position);
               rec.armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
               rec.toolMesh.position.set(...pose.toolInArms.position);
               rec.toolMesh.scale.setScalar(pose.toolInArms.scale);
+              rec.corpseMesh.position.set(...corpsePose.position);
+              setPlayerCorpseVisibility(rec, isCorpse);
               rec.poseSig = poseSig;
               rec.pitch = p.pitch;
               geometryOrTransformChanged = true;
@@ -901,6 +961,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             rec.headMesh.material = activeMat;
             rec.armsMesh.material = activeMat;
             rec.toolMesh.material = activeMat;
+            rec.corpseMesh.material = activeMat;
           }
 
           activeGeos.add(rec.legLeftMesh.geometry);
@@ -909,6 +970,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           activeGeos.add(rec.headMesh.geometry);
           activeGeos.add(rec.armsMesh.geometry);
           activeGeos.add(rec.toolMesh.geometry);
+          activeGeos.add(rec.corpseMesh.geometry);
         }
 
         for (const [id, rec] of renderedPlayers.entries()) {
@@ -1059,19 +1121,42 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         return projectWorldToScreen(markerPosition.x, markerPosition.y, markerPosition.z);
       };
 
-      // Post-Processing Composer (GPU only; crisp high-threshold bloom)
+      // Post-Processing Composer (GPU only; crisp high-threshold bloom + 3D volumetric god rays)
       let composer: EffectComposer | null = null;
       let renderPass: RenderPass | null = null;
-      let godRaysPass: ShaderPass | null = null;
+      let godRaysPass: VolumetricGodRaysPass | null = null;
       let bloomPass: UnrealBloomPass | null = null;
       let studioPass: ShaderPass | null = null;
       let outputPass: OutputPass | null = null;
 
       if (!isSoftwareGl) {
-        composer = new EffectComposer(renderer);
+        const initialPixelRatio = renderer.getPixelRatio();
+        const rtW = Math.max(1, Math.round(width * initialPixelRatio));
+        const rtH = Math.max(1, Math.round(height * initialPixelRatio));
+        const createDepthTexture = (dw: number, dh: number) => {
+          const dt = new THREE.DepthTexture(dw, dh, THREE.UnsignedIntType);
+          dt.format = THREE.DepthFormat;
+          dt.minFilter = THREE.NearestFilter;
+          dt.magFilter = THREE.NearestFilter;
+          return dt;
+        };
+        const composerRt = new THREE.WebGLRenderTarget(rtW, rtH, {
+          type: THREE.HalfFloatType,
+          depthBuffer: true,
+          depthTexture: createDepthTexture(rtW, rtH),
+        });
+        composer = new EffectComposer(renderer, composerRt);
+        composer.setSize(width, height);
+        composer.renderTarget2.depthTexture = createDepthTexture(rtW, rtH);
+
         renderPass = new RenderPass(scene, activeCamera);
         composer.addPass(renderPass);
-        godRaysPass = new ShaderPass(GodRaysShader);
+        godRaysPass = new VolumetricGodRaysPass(
+          rtW,
+          rtH,
+          () => activeCamera,
+          keyLight,
+        );
         godRaysPass.enabled = settingsRef.current.godRays;
         composer.addPass(godRaysPass);
         bloomPass = new UnrealBloomPass(
@@ -1079,15 +1164,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         );
         composer.addPass(bloomPass);
         studioPass = new ShaderPass(StudioPostShader);
-        const initialPixelRatio = renderer.getPixelRatio();
-        bloomPass.resolution.set(
-          Math.round(width * initialPixelRatio),
-          Math.round(height * initialPixelRatio),
-        );
-        studioPass.uniforms.uResolution.value.set(
-          Math.round(width * initialPixelRatio),
-          Math.round(height * initialPixelRatio),
-        );
+        bloomPass.resolution.set(rtW, rtH);
+        studioPass.uniforms.uResolution.value.set(rtW, rtH);
         composer.addPass(studioPass);
         outputPass = new OutputPass();
         composer.addPass(outputPass);
@@ -1167,31 +1245,30 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let lastTime = performance.now();
       let elapsedSec = 1.4;
 
-      const _godRaySunWorld = new THREE.Vector3();
-      const _godRayCamDir = new THREE.Vector3();
+      const _godRaySunColor = new THREE.Color();
+
+      const syncGodRaysPass = () => {
+        if (!godRaysPass) return;
+        const s = settingsRef.current;
+        const enabled = s.godRays && s.godRaysIntensity > 0.001;
+        godRaysPass.enabled = enabled;
+        if (enabled) {
+          const theme = BACKDROP_THEMES[s.backdrop];
+          _godRaySunColor.set(s.sunColor || theme.defaultSunHex);
+          godRaysPass.syncSceneParams({
+            lightDir: sharedUniforms.uLightDir.value,
+            sunColor: _godRaySunColor,
+            intensity: s.godRaysIntensity,
+            modelBounds,
+            modelRadius,
+          });
+        }
+      };
 
       const drawFrame = () => {
         skyMesh.position.copy(activeCamera.position);
         controls.autoRotateSpeed = settingsRef.current.autoRotateSpeed;
-
-        if (godRaysPass) {
-          const enabled = settingsRef.current.godRays;
-          godRaysPass.enabled = enabled;
-          if (enabled) {
-            const sunDir = _godRaySunWorld.copy(keyLight.position).normalize();
-            activeCamera.getWorldDirection(_godRayCamDir);
-            const facing = _godRayCamDir.dot(sunDir);
-            godRaysPass.uniforms.uVisibility.value = THREE.MathUtils.smoothstep(facing, -0.15, 0.25);
-            _godRaySunWorld.multiplyScalar(1000).add(activeCamera.position);
-            _godRaySunWorld.project(activeCamera);
-            godRaysPass.uniforms.uLightPos.value.set(
-              _godRaySunWorld.x * 0.5 + 0.5,
-              _godRaySunWorld.y * 0.5 + 0.5,
-            );
-            godRaysPass.uniforms.uSunColor.value.set(settingsRef.current.sunColor);
-            godRaysPass.uniforms.uIntensity.value = settingsRef.current.godRaysIntensity;
-          }
-        }
+        syncGodRaysPass();
 
         if (composer && !isSoftwareGl) composer.render();
         else renderer.render(scene, activeCamera);
@@ -1749,6 +1826,59 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const isInsideSlice = (worldX: number, worldY: number, worldZ: number): boolean =>
         !sliceActive || pointInsideSlice(slicePlane, worldX, worldY, worldZ);
 
+      const _shadowCorner = new THREE.Vector3();
+      const fitKeyLightShadowCamera = () => {
+        keyLight.updateMatrixWorld(true);
+        keyLight.target.updateMatrixWorld(true);
+        const shadowCam = keyLight.shadow.camera;
+        shadowCam.position.copy(keyLight.position);
+        shadowCam.lookAt(keyLight.target.position);
+        shadowCam.updateMatrixWorld(true);
+        const lightView = shadowCam.matrixWorldInverse;
+
+        const padXZ = Math.max(8, modelRadius * 0.06);
+        const padTop = Math.max(8, (modelBounds.max.y - modelBounds.min.y) * 0.25);
+        const minX = modelBounds.min.x - padXZ;
+        const maxX = modelBounds.max.x + padXZ;
+        const minY = modelBounds.min.y - 4;
+        const maxY = modelBounds.max.y + padTop;
+        const minZ = modelBounds.min.z - padXZ;
+        const maxZ = modelBounds.max.z + padXZ;
+
+        let lMinX = Infinity;
+        let lMaxX = -Infinity;
+        let lMinY = Infinity;
+        let lMaxY = -Infinity;
+        let lMinZ = Infinity;
+        let lMaxZ = -Infinity;
+
+        for (let ix = 0; ix < 2; ix++) {
+          for (let iy = 0; iy < 2; iy++) {
+            for (let iz = 0; iz < 2; iz++) {
+              _shadowCorner
+                .set(ix ? maxX : minX, iy ? maxY : minY, iz ? maxZ : minZ)
+                .applyMatrix4(lightView);
+              if (_shadowCorner.x < lMinX) lMinX = _shadowCorner.x;
+              if (_shadowCorner.x > lMaxX) lMaxX = _shadowCorner.x;
+              if (_shadowCorner.y < lMinY) lMinY = _shadowCorner.y;
+              if (_shadowCorner.y > lMaxY) lMaxY = _shadowCorner.y;
+              if (_shadowCorner.z < lMinZ) lMinZ = _shadowCorner.z;
+              if (_shadowCorner.z > lMaxZ) lMaxZ = _shadowCorner.z;
+            }
+          }
+        }
+
+        shadowCam.left = lMinX - 4;
+        shadowCam.right = lMaxX + 4;
+        shadowCam.bottom = lMinY - 4;
+        shadowCam.top = lMaxY + 4;
+        shadowCam.near = Math.max(1, -lMaxZ - 32);
+        // Extend `far` downwind so 3D volumetric light shafts emerging from
+        // buildings near the map edge stay inside shadow depth [0, 1].
+        shadowCam.far = Math.max(shadowCam.near + 64, -lMinZ + 240);
+        shadowCam.updateProjectionMatrix();
+      };
+
       const syncSettings = () => {
         const s = settingsRef.current;
         const theme = BACKDROP_THEMES[s.backdrop];
@@ -1778,6 +1908,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         keyLight.position.copy(_lightDir).multiplyScalar(lightDist);
         keyLight.position.y += modelCenterY;
         keyLight.target.position.set(0, modelCenterY * 0.4, 0);
+        fitKeyLightShadowCamera();
 
         if (s.lightAzimuth !== lastLightAz || s.lightElevation !== lastLightEl) {
           lastLightAz = s.lightAzimuth;
@@ -1953,14 +2084,19 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         modelRadius = Math.max(6, Math.hypot(sx, sy, sz) * 0.5);
         modelCenterY = sy * 0.5;
 
-        const d = Math.max(16, modelRadius * 1.45);
-        keyLight.shadow.camera.left = -d;
-        keyLight.shadow.camera.right = d;
-        keyLight.shadow.camera.top = d;
-        keyLight.shadow.camera.bottom = -d;
-        keyLight.shadow.camera.near = 1;
-        keyLight.shadow.camera.far = Math.max(200, d * 6);
-        keyLight.shadow.camera.updateProjectionMatrix();
+        const lightAz = THREE.MathUtils.degToRad(settingsRef.current.lightAzimuth);
+        const lightEl = THREE.MathUtils.degToRad(settingsRef.current.lightElevation);
+        _lightDir
+          .set(
+            Math.cos(lightEl) * Math.sin(lightAz),
+            Math.sin(lightEl),
+            Math.cos(lightEl) * Math.cos(lightAz),
+          )
+          .normalize();
+        keyLight.position.copy(_lightDir).multiplyScalar(Math.max(60, modelRadius * 2.6));
+        keyLight.position.y += modelCenterY;
+        keyLight.target.position.set(0, modelCenterY * 0.4, 0);
+        fitKeyLightShadowCamera();
 
         const footprint = Math.max(sx, sz);
         const shadowSize = Math.max(12, footprint * 1.55);
@@ -2021,9 +2157,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
 
-        if (godRaysPass) {
-          godRaysPass.uniforms.uSamples.value = 72;
-        }
+        godRaysPass?.setQualityMode(true);
 
         try {
           if (!targetWidth || targetWidth <= baseW) {
@@ -2083,14 +2217,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
           try {
             // Prefer a single composer render at the requested size: it keeps
-            // bloom / tilt-shift / chromatic / pixelate / vignette identical to
-            // the viewport while staying below SINGLE_PASS_MAX_PIXELS (~400 MB).
+            // god rays / bloom / tilt-shift / chromatic / pixelate / vignette
+            // identical to the viewport while staying below SINGLE_PASS_MAX_PIXELS (~400 MB).
             if (canUseSinglePassExport(targetW, targetH, maxTex, maxRb, Boolean(composer), isSoftwareGl)) {
               renderer.setPixelRatio(1);
               renderer.setSize(targetW, targetH, false);
               composer!.setPixelRatio(1);
               composer!.setSize(targetW, targetH);
+              if (bloomPass) bloomPass.resolution.set(targetW, targetH);
+              if (studioPass) studioPass.uniforms.uResolution.value.set(targetW, targetH);
               skyMesh.position.copy(activeCamera.position);
+              syncGodRaysPass();
               composer!.render();
               await downloadCanvasPng(renderer.domElement, filename);
               return;
@@ -2113,29 +2250,49 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             const tileCap = isSoftwareGl ? 1024 : Math.min(2048, maxTex, maxRb);
             const tiles = computeExportTiles(targetW, targetH, tileCap);
 
+            const post = settingsRef.current;
+            const useTiledVolumetricRays =
+              post.godRays && post.godRaysIntensity > 0.001 && Boolean(composer && godRaysPass) && !isSoftwareGl;
+            const savedBloomEnabled = bloomPass ? bloomPass.enabled : false;
+            const savedStudioEnabled = studioPass ? studioPass.enabled : false;
+
             renderer.setPixelRatio(1);
-            for (let i = 0; i < tiles.length; i++) {
-              const tile = tiles[i];
-              renderer.setSize(tile.width, tile.height, false);
-              activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
-              skyMesh.position.copy(activeCamera.position);
-              // Direct render, deliberately not the composer: the composer's
-              // offscreen targets are sized to the viewport, so reusing it per tile
-              // would scale/crop the frame. The studio pass is approximated in 2D
-              // on the assembled image below instead.
-              renderer.render(scene, activeCamera);
-              outCtx.drawImage(renderer.domElement, tile.x, tile.y);
-              if (i % 4 === 3) {
-                await new Promise((r) => window.setTimeout(r, 0));
+            if (useTiledVolumetricRays && composer) {
+              composer.setPixelRatio(1);
+              if (bloomPass) bloomPass.enabled = false;
+              if (studioPass) studioPass.enabled = false;
+              syncGodRaysPass();
+            }
+
+            try {
+              for (let i = 0; i < tiles.length; i++) {
+                const tile = tiles[i];
+                renderer.setSize(tile.width, tile.height, false);
+                activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
+                skyMesh.position.copy(activeCamera.position);
+                if (useTiledVolumetricRays && composer) {
+                  // 3D volumetric god rays only depend on each pixel's world ray and
+                  // the world-space directional shadow map, so rendering per-tile gives
+                  // seamless native-8K/16K volumetric shafts.
+                  composer.setSize(tile.width, tile.height);
+                  composer.render();
+                } else {
+                  renderer.render(scene, activeCamera);
+                }
+                outCtx.drawImage(renderer.domElement, tile.x, tile.y);
+                if (i % 4 === 3) {
+                  await new Promise((r) => window.setTimeout(r, 0));
+                }
+              }
+            } finally {
+              if (useTiledVolumetricRays) {
+                if (bloomPass) bloomPass.enabled = savedBloomEnabled;
+                if (studioPass) studioPass.enabled = savedStudioEnabled;
               }
             }
 
-            // The tile path bypasses the composer, so approximate the studio pass
-            // in 2D: the vignette and pixelate below mirror the shader versions
-            // (applied in sRGB space rather than linear, so the curve differs very
-            // slightly at extreme sizes). Chromatic aberration, bloom, and tilt-shift
-            // are skipped here; export at ~16 MP or below (e.g. 4K) to keep them.
-            const post = settingsRef.current;
+            // The tile path bypasses the studio pass, so approximate vignette and
+            // pixelate in 2D on the assembled canvas.
             if (post.vignette > 0.001) {
               const cx = targetW * 0.5;
               const cy = targetH * 0.5;
@@ -2155,9 +2312,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             restoreRendererSize();
           }
         } finally {
-          if (godRaysPass) {
-            godRaysPass.uniforms.uSamples.value = 16;
-          }
+          godRaysPass?.setQualityMode(false);
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
           playerHelperGroup.visible = savedPlayerHelpersVisible;
@@ -2426,8 +2581,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         outputPass?.dispose();
         bloomPass?.dispose();
         studioPass?.dispose();
+        godRaysPass?.dispose();
         renderPass?.dispose();
-        if (composer) composer.dispose();
+        if (composer) {
+          composer.renderTarget1.depthTexture?.dispose();
+          composer.renderTarget2.depthTexture?.dispose();
+          composer.dispose();
+        }
         renderer.dispose();
         if (renderer.domElement.parentNode === container) {
           container.removeChild(renderer.domElement);

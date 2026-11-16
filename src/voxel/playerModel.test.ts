@@ -1,13 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as THREE from 'three';
 import {
+  applySpawnedPlayerPatch,
   buildPivotCenteredPartData,
+  computeCorpseTransform,
   computePlayerPoseTransforms,
   createSpawnedPlayer,
+  createSpawnedPlayerFromPreset,
+  DEFAULT_ZOMBIE_CLOTH_COLOR,
   disposePlayerModelGeometryCache,
   duplicateSpawnedPlayer,
   getBasePlayerPartGrid,
   getPlayerPartGeometry,
+  PLAYER_PART_EULER_ORDER,
   prunePlayerModelGeometryCache,
   recolorKv6SentinelGrid,
   selectPlayerPartKeys,
@@ -200,4 +206,82 @@ test('prunePlayerModelGeometryCache evicts unused geometries without disposing a
   // Active geometry stays cached and reused
   assert.equal(getPlayerPartGeometry('classic_head', '#112233'), activeGeo);
   disposePlayerModelGeometryCache();
+});
+
+test('upward aim pitch tilts both head and arms upward (+Y) with PLAYER_PART_EULER_ORDER', () => {
+  const upPose = computePlayerPoseTransforms('standing', 'rifle', 30);
+  const downPose = computePlayerPoseTransforms('standing', 'rifle', -30);
+
+  // KV6 models face +Z in local part space before the Y = Math.PI flip turns them to -Z.
+  const kv6Front = new THREE.Vector3(0, 0, 1);
+
+  const headUpForward = kv6Front
+    .clone()
+    .applyEuler(new THREE.Euler(upPose.head.rotationX, upPose.head.rotationY, 0, PLAYER_PART_EULER_ORDER));
+  const armsUpForward = kv6Front
+    .clone()
+    .applyEuler(new THREE.Euler(0, upPose.arms.rotationY, 0, PLAYER_PART_EULER_ORDER))
+    .applyEuler(new THREE.Euler(upPose.arms.rotationX, 0, 0, 'XYZ'));
+
+  assert.ok(headUpForward.y > 0.4, `expected head to pitch upward (+Y), got y=${headUpForward.y}`);
+  assert.ok(armsUpForward.y > 0.4, `expected arms to pitch upward (+Y), got y=${armsUpForward.y}`);
+  assert.ok(Math.abs(headUpForward.y - armsUpForward.y) < 1e-6);
+
+  const headDownForward = kv6Front
+    .clone()
+    .applyEuler(new THREE.Euler(downPose.head.rotationX, downPose.head.rotationY, 0, PLAYER_PART_EULER_ORDER));
+  assert.ok(headDownForward.y < -0.4, `expected negative pitch to tilt head downward (-Y), got y=${headDownForward.y}`);
+});
+
+test('ZeroSpades zombie models always hold spades and zombie/player corpses sit flush at y = 0', () => {
+  const zombieParts = selectPlayerPartKeys('tactical', 'standing', 'rifle', 'zombie');
+  assert.equal(zombieParts.head, 'zombie_head');
+  assert.equal(zombieParts.torso, 'zombie_torso');
+  assert.equal(zombieParts.arms, 'zombie_arms');
+  assert.equal(zombieParts.legLeft, 'zombie_leg');
+  assert.equal(zombieParts.legRight, 'zombie_leg_right');
+  assert.equal(zombieParts.tool, 'weapon_spade');
+  assert.equal(zombieParts.corpse, 'zombie_dead');
+
+  const spawnedZombie = createSpawnedPlayerFromPreset('zombie', 4, 2, -6);
+  assert.equal(spawnedZombie.characterType, 'zombie');
+  assert.equal(spawnedZombie.weapon, 'spade');
+  assert.equal(spawnedZombie.teamColor, '#1D3521');
+  assert.equal(DEFAULT_ZOMBIE_CLOTH_COLOR, '#1D3521');
+
+  // Attempting to switch a zombie's weapon keeps it locked to spade
+  const patchedZombie = applySpawnedPlayerPatch(spawnedZombie, { weapon: 'shotgun' });
+  assert.equal(patchedZombie.weapon, 'spade');
+
+  const playerCorpse = createSpawnedPlayerFromPreset('player_corpse', 0, 1, 0);
+  assert.equal(playerCorpse.characterType, 'player');
+  assert.equal(playerCorpse.stance, 'corpse');
+
+  const zombieCorpse = createSpawnedPlayerFromPreset('zombie_corpse', 2, 1, 0);
+  assert.equal(zombieCorpse.characterType, 'zombie');
+  assert.equal(zombieCorpse.stance, 'corpse');
+  assert.equal(zombieCorpse.weapon, 'spade');
+
+  // Verify every corpse .kv6 sits flush on y = 0
+  for (const corpseKey of [
+    'classic_dead',
+    'rifle_dead',
+    'shotgun_dead',
+    'smg_dead',
+    'zombie_dead',
+  ] as const) {
+    const grid = getBasePlayerPartGrid(corpseKey);
+    assert.ok(grid.voxelCount > 500, `${corpseKey} should decode full corpse voxels`);
+    const data = buildPivotCenteredPartData(corpseKey, '#2F855A');
+    const transform = computeCorpseTransform(corpseKey);
+    let minY = Infinity;
+    for (let i = 1; i < data.positions.length; i += 3) {
+      if (data.positions[i] < minY) minY = data.positions[i];
+    }
+    const worldBottomY = transform.position[1] + minY * transform.scale;
+    assert.ok(
+      Math.abs(worldBottomY) < 1e-5,
+      `expected ${corpseKey} corpse bottom at y=0, got ${worldBottomY}`,
+    );
+  }
 });
