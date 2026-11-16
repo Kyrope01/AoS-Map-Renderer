@@ -190,7 +190,13 @@ export function PlayerModelPanel({
                         : player.teamColor,
                   });
                 } else {
-                  onUpdate(player.id, { characterType: 'player' });
+                  onUpdate(player.id, {
+                    characterType: 'player',
+                    teamColor:
+                      player.teamColor.toUpperCase() === DEFAULT_ZOMBIE_CLOTH_COLOR
+                        ? '#2B6CB0'
+                        : player.teamColor,
+                  });
                 }
               }}
               className={`px-2.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${

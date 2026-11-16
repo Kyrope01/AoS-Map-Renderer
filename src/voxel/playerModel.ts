@@ -447,7 +447,7 @@ export function generatePlayerId(): string {
   return `player-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
-export const DEFAULT_ZOMBIE_CLOTH_COLOR = '#2F855A';
+export const DEFAULT_ZOMBIE_CLOTH_COLOR = '#1D3521';
 
 export function createSpawnedPlayer(
   x: number,

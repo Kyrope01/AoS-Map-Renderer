@@ -695,9 +695,7 @@ export function ControlSidebar({
                             ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
                             : isActivePreset
                               ? 'bg-[#E05A2B] text-white border-[#E05A2B] cursor-wait'
-                              : btn.id === 'player' || btn.id === 'zombie'
-                                ? 'bg-[#E05A2B]/90 text-white border-[#E05A2B] hover:bg-[#C94D22] cursor-pointer'
-                                : `${inactiveBtn} bg-white/5 cursor-pointer`
+                              : `${inactiveBtn} bg-white/5 cursor-pointer`
                         }`}
                         title={
                           !stats

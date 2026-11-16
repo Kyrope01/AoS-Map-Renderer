@@ -8,6 +8,7 @@ import {
   computePlayerPoseTransforms,
   createSpawnedPlayer,
   createSpawnedPlayerFromPreset,
+  DEFAULT_ZOMBIE_CLOTH_COLOR,
   disposePlayerModelGeometryCache,
   duplicateSpawnedPlayer,
   getBasePlayerPartGrid,
@@ -245,6 +246,8 @@ test('ZeroSpades zombie models always hold spades and zombie/player corpses sit 
   const spawnedZombie = createSpawnedPlayerFromPreset('zombie', 4, 2, -6);
   assert.equal(spawnedZombie.characterType, 'zombie');
   assert.equal(spawnedZombie.weapon, 'spade');
+  assert.equal(spawnedZombie.teamColor, '#1D3521');
+  assert.equal(DEFAULT_ZOMBIE_CLOTH_COLOR, '#1D3521');
 
   // Attempting to switch a zombie's weapon keeps it locked to spade
   const patchedZombie = applySpawnedPlayerPatch(spawnedZombie, { weapon: 'shotgun' });
