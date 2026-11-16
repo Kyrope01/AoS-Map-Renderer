@@ -136,11 +136,15 @@ export interface MeshStats {
   meshMs: number;
 }
 
-export type PlayerStance = 'standing' | 'crouched' | 'sprinting';
+export type PlayerCharacterType = 'player' | 'zombie';
+
+export type PlayerStance = 'standing' | 'crouched' | 'sprinting' | 'corpse';
 
 export type PlayerWeapon = 'rifle' | 'shotgun' | 'smg' | 'grenade' | 'spade' | 'block';
 
 export type PlayerStyle = 'classic' | 'tactical';
+
+export type PlayerSpawnPreset = 'player' | 'zombie' | 'player_corpse' | 'zombie_corpse';
 
 export const MAX_SPAWNED_PLAYERS = 64;
 
@@ -156,6 +160,7 @@ export interface SpawnedPlayer {
   yaw: number;
   /** Aim / look pitch in degrees (-45..+45). */
   pitch: number;
+  characterType: PlayerCharacterType;
   stance: PlayerStance;
   weapon: PlayerWeapon;
   style: PlayerStyle;

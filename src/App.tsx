@@ -16,7 +16,8 @@ import { PrecomputedShadowData, VoxelViewport, VoxelViewportHandle } from './ren
 import { hydrateKv6Grid } from './voxel/kv6Parser';
 import { BuiltVoxelMesh, hydrateVoxelGeometry } from './voxel/mesher';
 import {
-  createSpawnedPlayer,
+  applySpawnedPlayerPatch,
+  createSpawnedPlayerFromPreset,
   duplicateSpawnedPlayer,
   snapPlayerYToGround,
 } from './voxel/playerModel';
@@ -24,6 +25,7 @@ import {
   MAX_SPAWNED_PLAYERS,
   MAX_VOXEL_LIGHTS,
   MeshStats,
+  PlayerSpawnPreset,
   RenderSettings,
   SpawnedPlayer,
   VoxelFormat,
@@ -103,9 +105,10 @@ export default function App() {
   const [shadowWarning, setShadowWarning] = useState<string | null>(null);
   const [selectedLightId, setSelectedLightId] = useState<string | null>(null);
 
-  // Miscellaneous: player models (.vxl maps only)
+  // Miscellaneous: player, zombie & corpse models (.vxl maps only)
   const [spawnedPlayers, setSpawnedPlayers] = useState<SpawnedPlayer[]>([]);
-  const [placingPlayer, setPlacingPlayer] = useState(false);
+  const [placingPlayerPreset, setPlacingPlayerPreset] = useState<PlayerSpawnPreset | null>(null);
+  const placingPlayer = placingPlayerPreset !== null;
   const [movingPlayerId, setMovingPlayerId] = useState<string | null>(null);
   const [selectedPlayerId, setSelectedPlayerId] = useState<string | null>(null);
 
@@ -144,14 +147,14 @@ export default function App() {
   const clearSpawnedPlayers = useCallback(() => {
     setSpawnedPlayers([]);
     setSelectedPlayerId(null);
-    setPlacingPlayer(false);
+    setPlacingPlayerPreset(null);
     setMovingPlayerId(null);
   }, []);
 
   const handleVoxelPicked = useCallback((x: number, y: number, z: number, normal: [number, number, number]) => {
     setSelectedPlayerId(null);
     setMovingPlayerId(null);
-    setPlacingPlayer(false);
+    setPlacingPlayerPreset(null);
     const existing = voxelLights.find((light) => light.x === x && light.y === y && light.z === z);
     if (existing) {
       setSelectedLightId(existing.id);
@@ -199,23 +202,23 @@ export default function App() {
   const handlePlacePlayer = useCallback(
     (x: number, y: number, z: number) => {
       if (loadedModel?.stats.format !== 'vxl') {
-        setPlacingPlayer(false);
+        setPlacingPlayerPreset(null);
         return;
       }
       if (spawnedPlayers.length >= MAX_SPAWNED_PLAYERS) {
-        setPlacingPlayer(false);
+        setPlacingPlayerPreset(null);
         setErrorMsg(
           `Maximum of ${MAX_SPAWNED_PLAYERS} player models reached. Remove one to add another.`,
         );
         return;
       }
-      const next = createSpawnedPlayer(x, y, z);
+      const next = createSpawnedPlayerFromPreset(placingPlayerPreset ?? 'player', x, y, z);
       setSpawnedPlayers((prev) => [...prev, next]);
       setSelectedLightId(null);
       setSelectedPlayerId(next.id);
-      setPlacingPlayer(false);
+      setPlacingPlayerPreset(null);
     },
-    [loadedModel?.stats.format, spawnedPlayers.length],
+    [loadedModel?.stats.format, placingPlayerPreset, spawnedPlayers.length],
   );
 
   const handleSelectPlayer = useCallback((id: string | null) => {
@@ -228,7 +231,9 @@ export default function App() {
   }, []);
 
   const updateSpawnedPlayer = useCallback((id: string, patch: Partial<SpawnedPlayer>) => {
-    setSpawnedPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, ...patch } : p)));
+    setSpawnedPlayers((prev) =>
+      prev.map((p) => (p.id === id ? applySpawnedPlayerPatch(p, patch) : p)),
+    );
   }, []);
 
   const handleMovePlayer = useCallback((id: string, x: number, y: number, z: number) => {
@@ -433,7 +438,7 @@ export default function App() {
       } else if (e.key === 'Escape') {
         setPickingLight((prev) => (prev ? false : prev));
         setSelectedLightId((prev) => (prev ? null : prev));
-        setPlacingPlayer((prev) => (prev ? false : prev));
+        setPlacingPlayerPreset((prev) => (prev ? null : prev));
         setMovingPlayerId((prev) => (prev ? null : prev));
         setSelectedPlayerId((prev) => (prev ? null : prev));
       }
@@ -503,13 +508,24 @@ export default function App() {
     const player = selectedPlayerRef.current;
     const playerPanelEl = playerPanelRef.current;
     if (player && playerPanelEl) {
-      const anchorY = player.y + (player.stance === 'crouched' ? 1.1 : 1.7);
+      const anchorOffset =
+        player.stance === 'corpse'
+          ? 0.35
+          : player.stance === 'crouched'
+            ? 1.1
+            : 1.7;
+      const anchorY = player.y + anchorOffset;
       const pos = vp.projectWorldToScreen(player.x, anchorY, player.z);
       playerPanelEl.style.visibility = pos.visible ? 'visible' : 'hidden';
       if (pos.visible) {
         const panelW = playerPanelEl.offsetWidth || PLAYER_PANEL_W;
         const panelH =
-          playerPanelEl.offsetHeight || (player.weapon === 'block' ? 470 : 424);
+          playerPanelEl.offsetHeight ||
+          (player.characterType !== 'zombie' &&
+          player.stance !== 'corpse' &&
+          player.weapon === 'block'
+            ? 500
+            : 454);
         const { left, top } = computeFloatingPanelCoords(
           pos.x,
           pos.y,
@@ -536,6 +552,7 @@ export default function App() {
     selectedPlayer?.x,
     selectedPlayer?.y,
     selectedPlayer?.z,
+    selectedPlayer?.characterType,
     selectedPlayer?.stance,
     selectedPlayer?.weapon,
     sidebarCollapsed,
@@ -678,15 +695,21 @@ export default function App() {
       )}
 
       {/* Player-model placement / relocation banner */}
-      {placingPlayer && (
+      {placingPlayerPreset && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-[#E05A2B]/40 bg-[#14171D]/94 text-[#F3F1EC] shadow-xl">
           <UserPlus className="w-4 h-4 text-[#E05A2B] shrink-0" aria-hidden="true" />
           <span className="text-xs font-medium whitespace-nowrap">
-            Click on the map to spawn a player model
+            {placingPlayerPreset === 'zombie'
+              ? 'Click on the map to spawn a zombie (holding spade)'
+              : placingPlayerPreset === 'player_corpse'
+                ? 'Click on the map to spawn a player corpse'
+                : placingPlayerPreset === 'zombie_corpse'
+                  ? 'Click on the map to spawn a zombie corpse'
+                  : 'Click on the map to spawn a player model'}
           </span>
           <button
             type="button"
-            onClick={() => setPlacingPlayer(false)}
+            onClick={() => setPlacingPlayerPreset(null)}
             className="px-2 py-1 rounded border border-white/15 text-[11px] font-medium text-[#C6CDD9] hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
             Cancel (Esc)
@@ -698,7 +721,7 @@ export default function App() {
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2.5 px-3.5 py-2 rounded-lg border border-[#E05A2B]/40 bg-[#14171D]/94 text-[#F3F1EC] shadow-xl">
           <Move className="w-4 h-4 text-[#E05A2B] shrink-0" aria-hidden="true" />
           <span className="text-xs font-medium whitespace-nowrap">
-            Click anywhere on the map to move the selected player
+            Click anywhere on the map to move the selected model
           </span>
           <button
             type="button"
@@ -721,7 +744,7 @@ export default function App() {
           onUpdate={updateSpawnedPlayer}
           onDuplicate={handleDuplicatePlayer}
           onToggleMoveOnMap={(id) => {
-            setPlacingPlayer(false);
+            setPlacingPlayerPreset(null);
             setPickingLight(false);
             setMovingPlayerId((prev) => (prev === id ? null : id));
           }}
@@ -817,7 +840,7 @@ export default function App() {
         onStartPickLight={() => {
           setSelectedLightId(null);
           setSelectedPlayerId(null);
-          setPlacingPlayer(false);
+          setPlacingPlayerPreset(null);
           setMovingPlayerId(null);
           setPickingLight(true);
         }}
@@ -828,14 +851,14 @@ export default function App() {
         onRemoveLight={removeVoxelLight}
         onClearLights={clearVoxelLights}
         spawnedPlayers={spawnedPlayers}
-        placingPlayer={placingPlayer}
+        placingPlayerPreset={placingPlayerPreset}
         selectedPlayerId={selectedPlayerId}
-        onStartPlacePlayer={() => {
+        onStartPlacePlayer={(preset) => {
           setPickingLight(false);
           setSelectedLightId(null);
           setSelectedPlayerId(null);
           setMovingPlayerId(null);
-          setPlacingPlayer(true);
+          setPlacingPlayerPreset((prev) => (prev === preset ? null : preset));
         }}
         onSelectPlayer={handleSelectPlayer}
         onDuplicatePlayer={handleDuplicatePlayer}

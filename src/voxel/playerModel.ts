@@ -8,6 +8,8 @@ import {
 } from './playerModelAssets';
 import {
   MAX_SPAWNED_PLAYERS,
+  PlayerCharacterType,
+  PlayerSpawnPreset,
   PlayerStance,
   PlayerStyle,
   PlayerWeapon,
@@ -15,10 +17,16 @@ import {
   VoxelGrid,
 } from './types';
 
+export const PLAYER_CHARACTER_OPTIONS: readonly { id: PlayerCharacterType; label: string }[] = [
+  { id: 'player', label: 'Player' },
+  { id: 'zombie', label: 'Zombie' },
+];
+
 export const PLAYER_STANCE_OPTIONS: readonly { id: PlayerStance; label: string }[] = [
   { id: 'standing', label: 'Standing' },
   { id: 'crouched', label: 'Crouched' },
   { id: 'sprinting', label: 'Sprinting' },
+  { id: 'corpse', label: 'Corpse' },
 ];
 
 export const PLAYER_WEAPON_OPTIONS: readonly { id: PlayerWeapon; label: string }[] = [
@@ -53,6 +61,14 @@ export const PLAYER_BLOCK_SWATCHES: readonly { label: string; hex: string }[] = 
   { label: 'Blue', hex: '#2B6CB0' },
 ];
 
+/**
+ * Euler order used on individual player limb meshes (`R_x(rotX) * R_y(rotY)`).
+ * Using `'XYZ'` ensures the `rotY = Math.PI` KV6 flip happens BEFORE `rotX`,
+ * matching ZeroSpades's `RotateX(pitch) * Scale(-1, -1, 1)` so positive aim
+ * pitch tilts both head and arms upward together.
+ */
+export const PLAYER_PART_EULER_ORDER: THREE.EulerOrder = 'XYZ';
+
 export interface PlayerPartKeySet {
   head: PlayerKv6PartKey;
   torso: PlayerKv6PartKey;
@@ -60,6 +76,7 @@ export interface PlayerPartKeySet {
   legLeft: PlayerKv6PartKey;
   legRight: PlayerKv6PartKey;
   tool: PlayerKv6PartKey;
+  corpse: PlayerKv6PartKey;
 }
 
 export interface PartLocalTransform {
@@ -260,12 +277,14 @@ export function disposePlayerModelGeometryCache(): void {
 }
 
 /**
- * Selects ZeroSpades KV6 part keys matching the player's style, stance, and weapon.
+ * Selects ZeroSpades KV6 part keys matching character type, style, stance, and weapon.
+ * Zombies always use the ZeroSpades `Zombie/*` limb/corpse models and hold a spade.
  */
 export function selectPlayerPartKeys(
   style: PlayerStyle,
   stance: PlayerStance,
   weapon: PlayerWeapon,
+  characterType: PlayerCharacterType = 'player',
 ): PlayerPartKeySet {
   const crouched = stance === 'crouched';
   const toolMap: Record<PlayerWeapon, PlayerKv6PartKey> = {
@@ -277,6 +296,18 @@ export function selectPlayerPartKeys(
     block: 'weapon_block',
   };
 
+  if (characterType === 'zombie') {
+    return {
+      head: 'zombie_head',
+      torso: crouched ? 'zombie_torso_crouch' : 'zombie_torso',
+      arms: 'zombie_arms',
+      legLeft: crouched ? 'zombie_leg_crouch' : 'zombie_leg',
+      legRight: crouched ? 'zombie_leg_right_crouch' : 'zombie_leg_right',
+      tool: 'weapon_spade',
+      corpse: 'zombie_dead',
+    };
+  }
+
   if (style === 'classic') {
     return {
       head: 'classic_head',
@@ -285,6 +316,7 @@ export function selectPlayerPartKeys(
       legLeft: crouched ? 'classic_leg_crouch' : 'classic_leg',
       legRight: crouched ? 'classic_leg_crouch' : 'classic_leg',
       tool: toolMap[weapon],
+      corpse: 'classic_dead',
     };
   }
 
@@ -298,6 +330,27 @@ export function selectPlayerPartKeys(
     legLeft: crouched ? 'rifle_leg_crouch' : 'rifle_leg',
     legRight: crouched ? 'rifle_leg_right_crouch' : 'rifle_leg_right',
     tool: toolMap[weapon],
+    corpse: `${classPrefix}_dead`,
+  };
+}
+
+/**
+ * Computes the local transform for a ZeroSpades `Dead.kv6` corpse model so its
+ * lowest voxel rests flush on `y = 0` at `scale = 0.1`.
+ */
+export function computeCorpseTransform(corpsePartKey: PlayerKv6PartKey): PartLocalTransform {
+  const data = buildPivotCenteredPartData(corpsePartKey);
+  let minY = Infinity;
+  for (let i = 1; i < data.positions.length; i += 3) {
+    if (data.positions[i] < minY) minY = data.positions[i];
+  }
+  const scale = 0.1;
+  const groundOffsetY = Number.isFinite(minY) ? -minY * scale : 0.2;
+  return {
+    position: [0, groundOffsetY, 0],
+    rotationX: 0,
+    rotationY: Math.PI,
+    scale,
   };
 }
 
@@ -394,12 +447,19 @@ export function generatePlayerId(): string {
   return `player-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 }
 
+export const DEFAULT_ZOMBIE_CLOTH_COLOR = '#2F855A';
+
 export function createSpawnedPlayer(
   x: number,
   y: number,
   z: number,
   overrides?: Partial<Omit<SpawnedPlayer, 'id' | 'x' | 'y' | 'z'>>,
 ): SpawnedPlayer {
+  const characterType: PlayerCharacterType = overrides?.characterType ?? 'player';
+  const weapon: PlayerWeapon =
+    characterType === 'zombie' ? 'spade' : (overrides?.weapon ?? 'rifle');
+  const defaultTeamColor =
+    characterType === 'zombie' ? DEFAULT_ZOMBIE_CLOTH_COLOR : '#2B6CB0';
   return {
     id: generatePlayerId(),
     x: Math.round(x * 100) / 100,
@@ -407,12 +467,61 @@ export function createSpawnedPlayer(
     z: Math.round(z * 100) / 100,
     yaw: overrides?.yaw ?? 0,
     pitch: overrides?.pitch ?? 0,
+    characterType,
     stance: overrides?.stance ?? 'standing',
-    weapon: overrides?.weapon ?? 'rifle',
+    weapon,
     style: overrides?.style ?? 'classic',
-    teamColor: overrides?.teamColor ?? '#2B6CB0',
+    teamColor: overrides?.teamColor ?? defaultTeamColor,
     blockColor: overrides?.blockColor ?? '#7F5539',
   };
+}
+
+export function createSpawnedPlayerFromPreset(
+  preset: PlayerSpawnPreset,
+  x: number,
+  y: number,
+  z: number,
+): SpawnedPlayer {
+  switch (preset) {
+    case 'zombie':
+      return createSpawnedPlayer(x, y, z, {
+        characterType: 'zombie',
+        stance: 'standing',
+        weapon: 'spade',
+      });
+    case 'player_corpse':
+      return createSpawnedPlayer(x, y, z, {
+        characterType: 'player',
+        stance: 'corpse',
+      });
+    case 'zombie_corpse':
+      return createSpawnedPlayer(x, y, z, {
+        characterType: 'zombie',
+        stance: 'corpse',
+        weapon: 'spade',
+      });
+    case 'player':
+    default:
+      return createSpawnedPlayer(x, y, z, {
+        characterType: 'player',
+        stance: 'standing',
+      });
+  }
+}
+
+/**
+ * Applies a partial update to a SpawnedPlayer while enforcing ZeroSpades invariants
+ * (zombies always hold spades).
+ */
+export function applySpawnedPlayerPatch(
+  player: SpawnedPlayer,
+  patch: Partial<SpawnedPlayer>,
+): SpawnedPlayer {
+  const next: SpawnedPlayer = { ...player, ...patch };
+  if (next.characterType === 'zombie') {
+    next.weapon = 'spade';
+  }
+  return next;
 }
 
 /**

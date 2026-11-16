@@ -19,6 +19,7 @@ import {
   MAX_SPAWNED_PLAYERS,
   MAX_VOXEL_LIGHTS,
   MeshStats,
+  PlayerSpawnPreset,
   RenderSettings,
   SliceAxis,
   SpawnedPlayer,
@@ -43,9 +44,9 @@ interface ControlSidebarProps {
   onRemoveLight: (id: string) => void;
   onClearLights: () => void;
   spawnedPlayers: SpawnedPlayer[];
-  placingPlayer: boolean;
+  placingPlayerPreset: PlayerSpawnPreset | null;
   selectedPlayerId: string | null;
-  onStartPlacePlayer: () => void;
+  onStartPlacePlayer: (preset: PlayerSpawnPreset) => void;
   onSelectPlayer: (id: string | null) => void;
   onDuplicatePlayer: (id: string) => void;
   onRemovePlayer: (id: string) => void;
@@ -346,7 +347,7 @@ export function ControlSidebar({
   onRemoveLight,
   onClearLights,
   spawnedPlayers,
-  placingPlayer,
+  placingPlayerPreset,
   selectedPlayerId,
   onStartPlacePlayer,
   onSelectPlayer,
@@ -660,69 +661,87 @@ export function ControlSidebar({
               onClick={() => setPlayersOpen((open) => !open)}
               className={`w-full px-3 py-2 rounded-md border text-xs font-semibold transition-colors cursor-pointer ${playersOpen ? activeBtn : inactiveBtn}`}
             >
-              Player Models
+              Players, Zombies & Corpses
             </button>
             {playersOpen && (
               <div className="p-3 rounded-md border border-white/10 bg-white/5 space-y-2.5">
                 <div className="flex items-center justify-between text-[10px]">
                   <span className={mutedText}>.vxl maps only</span>
                   <span className={`tabular-nums ${mutedText}`}>
-                    {spawnedPlayers.length} / {MAX_SPAWNED_PLAYERS} players
+                    {spawnedPlayers.length} / {MAX_SPAWNED_PLAYERS} models
                   </span>
                 </div>
-                <button
-                  type="button"
-                  disabled={
-                    stats?.format !== 'vxl' ||
-                    placingPlayer ||
-                    spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
-                  }
-                  onClick={onStartPlacePlayer}
-                  className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md border text-xs font-semibold transition-colors ${
-                    placingPlayer
-                      ? 'bg-[#E05A2B] text-white border-[#E05A2B] cursor-wait'
-                      : stats?.format !== 'vxl' || spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
-                        ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
-                        : 'bg-[#E05A2B] text-white border-[#E05A2B] hover:bg-[#C94D22] cursor-pointer'
-                  }`}
-                  title={
-                    !stats
-                      ? 'Import a .vxl map first'
-                      : stats.format !== 'vxl'
-                        ? 'Player Models require an Ace of Spades .vxl map'
-                        : spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
-                          ? `Maximum of ${MAX_SPAWNED_PLAYERS} players`
-                          : placingPlayer
-                            ? 'Click anywhere on the .vxl map to spawn a player'
-                            : 'Click, then click anywhere on the .vxl map to spawn a player'
-                  }
-                >
-                  <span>{placingPlayer ? 'Click map to spawn…' : 'Place Player Model'}</span>
-                </button>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {(
+                    [
+                      { id: 'player', label: 'Spawn Player', tip: 'Spawn a live Ace of Spades player' },
+                      { id: 'zombie', label: 'Spawn Zombie', tip: 'Spawn a ZeroSpades zombie (always holds a spade)' },
+                      { id: 'player_corpse', label: 'Player Corpse', tip: 'Spawn a fallen player corpse' },
+                      { id: 'zombie_corpse', label: 'Zombie Corpse', tip: 'Spawn a fallen zombie corpse' },
+                    ] as const
+                  ).map((btn) => {
+                    const isActivePreset = placingPlayerPreset === btn.id;
+                    const disabled =
+                      stats?.format !== 'vxl' || spawnedPlayers.length >= MAX_SPAWNED_PLAYERS;
+                    return (
+                      <button
+                        key={btn.id}
+                        type="button"
+                        disabled={disabled}
+                        aria-pressed={isActivePreset}
+                        onClick={() => onStartPlacePlayer(btn.id)}
+                        className={`flex items-center justify-center px-2.5 py-2 rounded-md border text-[11px] font-semibold transition-colors ${
+                          disabled
+                            ? 'text-[#6B7280] border-white/10 cursor-not-allowed'
+                            : isActivePreset
+                              ? 'bg-[#E05A2B] text-white border-[#E05A2B] cursor-wait'
+                              : btn.id === 'player' || btn.id === 'zombie'
+                                ? 'bg-[#E05A2B]/90 text-white border-[#E05A2B] hover:bg-[#C94D22] cursor-pointer'
+                                : `${inactiveBtn} bg-white/5 cursor-pointer`
+                        }`}
+                        title={
+                          !stats
+                            ? 'Import a .vxl map first'
+                            : stats.format !== 'vxl'
+                              ? 'Player & Zombie models require an Ace of Spades .vxl map'
+                              : spawnedPlayers.length >= MAX_SPAWNED_PLAYERS
+                                ? `Maximum of ${MAX_SPAWNED_PLAYERS} models`
+                                : isActivePreset
+                                  ? 'Click anywhere on the .vxl map to spawn'
+                                  : btn.tip
+                        }
+                      >
+                        <span className="truncate">
+                          {isActivePreset ? 'Click map…' : btn.label}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
 
                 {!stats && (
                   <p className={`text-[11px] leading-relaxed ${mutedText}`}>
-                    Import a <span className="font-mono-tabular">.vxl</span> map first — Player
-                    Models are available on <span className="font-mono-tabular">.vxl</span> maps.
+                    Import a <span className="font-mono-tabular">.vxl</span> map first — Players,
+                    Zombies, and Corpses are available on <span className="font-mono-tabular">.vxl</span> maps.
                   </p>
                 )}
                 {stats && stats.format !== 'vxl' && (
                   <p className={`text-[11px] leading-relaxed ${mutedText}`}>
-                    Player Models are only available when a{' '}
+                    Players, Zombies, and Corpses are only available when a{' '}
                     <span className="font-mono-tabular">.vxl</span> map file is loaded.
                   </p>
                 )}
                 {stats?.format === 'vxl' &&
                   spawnedPlayers.length === 0 &&
-                  !placingPlayer && (
+                  placingPlayerPreset === null && (
                     <p className={`text-[11px] leading-relaxed ${mutedText}`}>
-                      No player models yet. Place one on the map — click any spawned model to edit
-                      its stance, weapon, team color, or duplicate it right beside it.
+                      Spawn a player, spade-wielding zombie, or corpse on the map — click any model
+                      to edit its pose, color, or duplicate it right beside it.
                     </p>
                   )}
                 {spawnedPlayers.length >= MAX_SPAWNED_PLAYERS && (
                   <p className={`text-[11px] leading-relaxed ${mutedText}`}>
-                    Maximum of {MAX_SPAWNED_PLAYERS} player models reached. Remove one to add
+                    Maximum of {MAX_SPAWNED_PLAYERS} models reached. Remove one to add
                     another.
                   </p>
                 )}
@@ -731,12 +750,18 @@ export function ControlSidebar({
                   <div className="space-y-1.5">
                     {spawnedPlayers.map((player, index) => {
                       const isSelected = selectedPlayerId === player.id;
+                      const isZombie = player.characterType === 'zombie';
+                      const effectiveWeapon = isZombie ? 'spade' : player.weapon;
                       const weaponLabel =
-                        player.weapon === 'smg'
+                        effectiveWeapon === 'smg'
                           ? 'SMG'
-                          : player.weapon.charAt(0).toUpperCase() + player.weapon.slice(1);
+                          : effectiveWeapon.charAt(0).toUpperCase() + effectiveWeapon.slice(1);
                       const stanceLabel =
                         player.stance.charAt(0).toUpperCase() + player.stance.slice(1);
+                      const summaryLabel =
+                        player.stance === 'corpse'
+                          ? `${isZombie ? 'Zombie' : 'Player'} · Corpse`
+                          : `${isZombie ? 'Zombie' : 'Player'} · ${weaponLabel} · ${stanceLabel}`;
                       return (
                         <div
                           key={player.id}
@@ -750,7 +775,7 @@ export function ControlSidebar({
                             type="button"
                             onClick={() => onSelectPlayer(isSelected ? null : player.id)}
                             className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
-                            title="Show pose and weapon controls next to this player"
+                            title="Show pose and model controls next to this model"
                           >
                             <span
                               className="w-3 h-3 rounded-sm border border-white/25 shrink-0"
@@ -759,7 +784,7 @@ export function ControlSidebar({
                             />
                             <span className="min-w-0">
                               <span className="block text-[11px] font-semibold text-[#D4DAE4] truncate">
-                                #{index + 1} · {weaponLabel} · {stanceLabel}
+                                #{index + 1} · {summaryLabel}
                               </span>
                               <span className={`block font-mono-tabular text-[10px] ${mutedText}`}>
                                 {player.x.toFixed(1)}, {player.y.toFixed(1)}, {player.z.toFixed(1)}

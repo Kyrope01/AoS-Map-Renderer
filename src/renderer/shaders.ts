@@ -1338,6 +1338,7 @@ export const GodRaysShader = {
     uIntensity: { value: 0.65 },
     uSamples: { value: 16 },
     uVisibility: { value: 1.0 },
+    uRaysOnly: { value: 0.0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -1353,21 +1354,26 @@ export const GodRaysShader = {
     uniform float uIntensity;
     uniform int uSamples;
     uniform float uVisibility;
+    uniform float uRaysOnly;
     varying vec2 vUv;
 
     void main() {
       vec4 base = texture2D(tDiffuse, vUv);
       if (uIntensity <= 0.001 || uVisibility <= 0.001 || uSamples <= 0) {
-        gl_FragColor = base;
+        gl_FragColor = uRaysOnly > 0.5 ? vec4(0.0, 0.0, 0.0, 1.0) : base;
         return;
       }
 
       vec2 coord = vUv;
-      vec2 delta = (vUv - uLightPos) * (0.92 / float(uSamples));
+      float invSamples = 1.0 / float(uSamples);
+      vec2 delta = (vUv - uLightPos) * (0.98 * invSamples);
+      // Normalize total ray attenuation across the full march so 16-sample live
+      // preview and 96-sample high-quality PNG export match in brightness.
+      float stepDecay = pow(0.565, invSamples);
       vec3 accum = vec3(0.0);
       float illuminationDecay = 1.0;
 
-      for (int i = 0; i < 96; i++) {
+      for (int i = 0; i < 128; i++) {
         if (i >= uSamples) break;
         coord -= delta;
         if (coord.x >= 0.0 && coord.x <= 1.0 && coord.y >= 0.0 && coord.y <= 1.0) {
@@ -1376,11 +1382,15 @@ export const GodRaysShader = {
           float bright = smoothstep(0.42, 1.15, lum);
           accum += s * bright * illuminationDecay;
         }
-        illuminationDecay *= 0.965;
+        illuminationDecay *= stepDecay;
       }
 
-      vec3 rays = (accum / float(uSamples)) * uIntensity * uVisibility * uSunColor;
-      gl_FragColor = vec4(base.rgb + rays, base.a);
+      vec3 rays = (accum * invSamples) * uIntensity * uVisibility * uSunColor;
+      if (uRaysOnly > 0.5) {
+        gl_FragColor = vec4(rays, 1.0);
+      } else {
+        gl_FragColor = vec4(base.rgb + rays, base.a);
+      }
     }
   `,
 };

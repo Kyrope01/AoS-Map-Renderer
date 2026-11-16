@@ -6,6 +6,7 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  GodRaysShader,
   MAX_VOXEL_SHADOW_CASTERS,
   StudioPostShader,
 } from './shaders';
@@ -107,6 +108,7 @@ test('shaders never use reversed smoothstep edges (spec-undefined)', () => {
     resolveIncludes(sky.fragmentShader),
     resolveIncludes(ocean.material.fragmentShader),
     StudioPostShader.fragmentShader,
+    GodRaysShader.fragmentShader,
   ];
   sky.dispose();
   ocean.material.dispose();

@@ -11,9 +11,11 @@ import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { BuiltVoxelMesh } from '../voxel/mesher';
 import {
+  computeCorpseTransform,
   computePlayerPoseTransforms,
   disposePlayerModelGeometryCache,
   getPlayerPartGeometry,
+  PLAYER_PART_EULER_ORDER,
   prunePlayerModelGeometryCache,
   selectPlayerPartKeys,
 } from '../voxel/playerModel';
@@ -672,6 +674,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         armsPivot: THREE.Group;
         armsMesh: THREE.Mesh;
         toolMesh: THREE.Mesh;
+        corpseMesh: THREE.Mesh;
         poseSig: string;
         geoSig: string;
         x: number;
@@ -719,10 +722,19 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         mesh.castShadow = !isSoftwareGl;
         mesh.receiveShadow = !isSoftwareGl;
         mesh.position.set(pos[0], pos[1], pos[2]);
-        mesh.rotation.set(rotX, rotY, 0, 'YXZ');
+        mesh.rotation.set(rotX, rotY, 0, PLAYER_PART_EULER_ORDER);
         mesh.scale.setScalar(scale);
         mesh.userData.playerId = playerId;
         return mesh;
+      };
+
+      const setPlayerCorpseVisibility = (rec: RenderedPlayerRecord, isCorpse: boolean) => {
+        rec.corpseMesh.visible = isCorpse;
+        rec.legLeftMesh.visible = !isCorpse;
+        rec.legRightMesh.visible = !isCorpse;
+        rec.torsoMesh.visible = !isCorpse;
+        rec.headMesh.visible = !isCorpse;
+        rec.armsPivot.visible = !isCorpse;
       };
 
       const syncPlayers = () => {
@@ -750,13 +762,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
         for (const p of players) {
           activeIds.add(p.id);
-          const geoSig = `${p.style}|${p.stance}|${p.teamColor}|${p.weapon === 'block' ? p.blockColor : p.weapon}`;
-          const poseSig = `${p.stance}|${p.weapon}|${p.pitch}`;
+          const characterType = p.characterType ?? 'player';
+          const effectiveWeapon = characterType === 'zombie' ? 'spade' : p.weapon;
+          const isCorpse = p.stance === 'corpse';
+          const geoSig = `${characterType}|${p.style}|${p.stance}|${p.teamColor}|${effectiveWeapon === 'block' ? p.blockColor : effectiveWeapon}`;
+          const poseSig = `${characterType}|${p.style}|${p.stance}|${effectiveWeapon}|${p.pitch}`;
           let rec = renderedPlayers.get(p.id);
 
           if (!rec) {
-            const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
-            const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+            const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
+            const pose = computePlayerPoseTransforms(p.stance, effectiveWeapon, p.pitch);
+            const corpsePose = computeCorpseTransform(parts.corpse);
             const root = new THREE.Group();
             root.name = `player-${p.id}`;
             root.userData.playerId = p.id;
@@ -816,7 +832,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               pose.arms.scale,
             );
             const toolGeo =
-              p.weapon === 'block'
+              effectiveWeapon === 'block'
                 ? getPlayerPartGeometry(parts.tool, p.blockColor)
                 : getPlayerPartGeometry(parts.tool);
             const toolMesh = makePlayerPartMesh(
@@ -829,7 +845,18 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               pose.toolInArms.scale,
             );
             armsPivot.add(armsMesh, toolMesh);
-            root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot);
+
+            const corpseMesh = makePlayerPartMesh(
+              getPlayerPartGeometry(parts.corpse, p.teamColor),
+              p.id,
+              activeMat,
+              corpsePose.position,
+              corpsePose.rotationX,
+              corpsePose.rotationY,
+              corpsePose.scale,
+            );
+
+            root.add(legLeftMesh, legRightMesh, torsoMesh, headMesh, armsPivot, corpseMesh);
             playersGroup.add(root);
 
             rec = {
@@ -841,6 +868,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               armsPivot,
               armsMesh,
               toolMesh,
+              corpseMesh,
               poseSig,
               geoSig,
               x: p.x,
@@ -849,6 +877,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               yaw: p.yaw,
               pitch: p.pitch,
             };
+            setPlayerCorpseVisibility(rec, isCorpse);
             renderedPlayers.set(p.id, rec);
             geometryOrTransformChanged = true;
           } else {
@@ -865,32 +894,60 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               geometryOrTransformChanged = true;
             }
             if (rec.geoSig !== geoSig) {
-              const parts = selectPlayerPartKeys(p.style, p.stance, p.weapon);
+              const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
               rec.legLeftMesh.geometry = getPlayerPartGeometry(parts.legLeft, p.teamColor);
               rec.legRightMesh.geometry = getPlayerPartGeometry(parts.legRight, p.teamColor);
               rec.torsoMesh.geometry = getPlayerPartGeometry(parts.torso, p.teamColor);
               rec.headMesh.geometry = getPlayerPartGeometry(parts.head, p.teamColor);
               rec.armsMesh.geometry = getPlayerPartGeometry(parts.arms, p.teamColor);
               rec.toolMesh.geometry =
-                p.weapon === 'block'
+                effectiveWeapon === 'block'
                   ? getPlayerPartGeometry(parts.tool, p.blockColor)
                   : getPlayerPartGeometry(parts.tool);
+              rec.corpseMesh.geometry = getPlayerPartGeometry(parts.corpse, p.teamColor);
+              const corpsePose = computeCorpseTransform(parts.corpse);
+              rec.corpseMesh.position.set(...corpsePose.position);
+              rec.corpseMesh.rotation.set(
+                corpsePose.rotationX,
+                corpsePose.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.geoSig = geoSig;
               geometryOrTransformChanged = true;
             }
             if (rec.poseSig !== poseSig) {
-              const pose = computePlayerPoseTransforms(p.stance, p.weapon, p.pitch);
+              const parts = selectPlayerPartKeys(p.style, p.stance, effectiveWeapon, characterType);
+              const pose = computePlayerPoseTransforms(p.stance, effectiveWeapon, p.pitch);
+              const corpsePose = computeCorpseTransform(parts.corpse);
               rec.legLeftMesh.position.set(...pose.legLeft.position);
-              rec.legLeftMesh.rotation.set(pose.legLeft.rotationX, pose.legLeft.rotationY, 0, 'YXZ');
+              rec.legLeftMesh.rotation.set(
+                pose.legLeft.rotationX,
+                pose.legLeft.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.legRightMesh.position.set(...pose.legRight.position);
-              rec.legRightMesh.rotation.set(pose.legRight.rotationX, pose.legRight.rotationY, 0, 'YXZ');
+              rec.legRightMesh.rotation.set(
+                pose.legRight.rotationX,
+                pose.legRight.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.torsoMesh.position.set(...pose.torso.position);
               rec.headMesh.position.set(...pose.head.position);
-              rec.headMesh.rotation.set(pose.head.rotationX, pose.head.rotationY, 0, 'YXZ');
+              rec.headMesh.rotation.set(
+                pose.head.rotationX,
+                pose.head.rotationY,
+                0,
+                PLAYER_PART_EULER_ORDER,
+              );
               rec.armsPivot.position.set(...pose.arms.position);
               rec.armsPivot.rotation.set(pose.arms.rotationX, 0, 0);
               rec.toolMesh.position.set(...pose.toolInArms.position);
               rec.toolMesh.scale.setScalar(pose.toolInArms.scale);
+              rec.corpseMesh.position.set(...corpsePose.position);
+              setPlayerCorpseVisibility(rec, isCorpse);
               rec.poseSig = poseSig;
               rec.pitch = p.pitch;
               geometryOrTransformChanged = true;
@@ -901,6 +958,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             rec.headMesh.material = activeMat;
             rec.armsMesh.material = activeMat;
             rec.toolMesh.material = activeMat;
+            rec.corpseMesh.material = activeMat;
           }
 
           activeGeos.add(rec.legLeftMesh.geometry);
@@ -909,6 +967,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           activeGeos.add(rec.headMesh.geometry);
           activeGeos.add(rec.armsMesh.geometry);
           activeGeos.add(rec.toolMesh.geometry);
+          activeGeos.add(rec.corpseMesh.geometry);
         }
 
         for (const [id, rec] of renderedPlayers.entries()) {
@@ -1170,28 +1229,32 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const _godRaySunWorld = new THREE.Vector3();
       const _godRayCamDir = new THREE.Vector3();
 
+      const syncGodRaysPass = () => {
+        if (!godRaysPass) return;
+        const s = settingsRef.current;
+        const enabled = s.godRays;
+        godRaysPass.enabled = enabled;
+        if (enabled) {
+          const sunDir = _godRaySunWorld.copy(sharedUniforms.uLightDir.value).normalize();
+          activeCamera.getWorldDirection(_godRayCamDir);
+          const facing = _godRayCamDir.dot(sunDir);
+          godRaysPass.uniforms.uVisibility.value = THREE.MathUtils.smoothstep(facing, -0.15, 0.25);
+          _godRaySunWorld.multiplyScalar(5200).add(activeCamera.position);
+          _godRaySunWorld.project(activeCamera);
+          godRaysPass.uniforms.uLightPos.value.set(
+            _godRaySunWorld.x * 0.5 + 0.5,
+            _godRaySunWorld.y * 0.5 + 0.5,
+          );
+          const theme = BACKDROP_THEMES[s.backdrop];
+          godRaysPass.uniforms.uSunColor.value.set(s.sunColor || theme.defaultSunHex);
+          godRaysPass.uniforms.uIntensity.value = s.godRaysIntensity;
+        }
+      };
+
       const drawFrame = () => {
         skyMesh.position.copy(activeCamera.position);
         controls.autoRotateSpeed = settingsRef.current.autoRotateSpeed;
-
-        if (godRaysPass) {
-          const enabled = settingsRef.current.godRays;
-          godRaysPass.enabled = enabled;
-          if (enabled) {
-            const sunDir = _godRaySunWorld.copy(keyLight.position).normalize();
-            activeCamera.getWorldDirection(_godRayCamDir);
-            const facing = _godRayCamDir.dot(sunDir);
-            godRaysPass.uniforms.uVisibility.value = THREE.MathUtils.smoothstep(facing, -0.15, 0.25);
-            _godRaySunWorld.multiplyScalar(1000).add(activeCamera.position);
-            _godRaySunWorld.project(activeCamera);
-            godRaysPass.uniforms.uLightPos.value.set(
-              _godRaySunWorld.x * 0.5 + 0.5,
-              _godRaySunWorld.y * 0.5 + 0.5,
-            );
-            godRaysPass.uniforms.uSunColor.value.set(settingsRef.current.sunColor);
-            godRaysPass.uniforms.uIntensity.value = settingsRef.current.godRaysIntensity;
-          }
-        }
+        syncGodRaysPass();
 
         if (composer && !isSoftwareGl) composer.render();
         else renderer.render(scene, activeCamera);
@@ -2022,7 +2085,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const baseH = Math.max(1, renderer.domElement.height);
 
         if (godRaysPass) {
-          godRaysPass.uniforms.uSamples.value = 72;
+          godRaysPass.uniforms.uSamples.value = 96;
+          godRaysPass.uniforms.uRaysOnly.value = 0.0;
         }
 
         try {
@@ -2083,14 +2147,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
           try {
             // Prefer a single composer render at the requested size: it keeps
-            // bloom / tilt-shift / chromatic / pixelate / vignette identical to
-            // the viewport while staying below SINGLE_PASS_MAX_PIXELS (~400 MB).
+            // god rays / bloom / tilt-shift / chromatic / pixelate / vignette
+            // identical to the viewport while staying below SINGLE_PASS_MAX_PIXELS (~400 MB).
             if (canUseSinglePassExport(targetW, targetH, maxTex, maxRb, Boolean(composer), isSoftwareGl)) {
               renderer.setPixelRatio(1);
               renderer.setSize(targetW, targetH, false);
               composer!.setPixelRatio(1);
               composer!.setSize(targetW, targetH);
+              if (bloomPass) bloomPass.resolution.set(targetW, targetH);
+              if (studioPass) studioPass.uniforms.uResolution.value.set(targetW, targetH);
               skyMesh.position.copy(activeCamera.position);
+              syncGodRaysPass();
               composer!.render();
               await downloadCanvasPng(renderer.domElement, filename);
               return;
@@ -2130,12 +2197,48 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
               }
             }
 
+            const post = settingsRef.current;
+
+            // Radial god rays span the full frame toward `uLightPos` (which lies
+            // outside individual tiles), so render a dedicated full-frame rays-only
+            // pass at up to 2560px and composite it smoothly over the 8K/16K tiles.
+            if (post.godRays && post.godRaysIntensity > 0.001 && composer && godRaysPass && !isSoftwareGl) {
+              activeCamera.clearViewOffset();
+              syncGodRaysPass();
+              if ((godRaysPass.uniforms.uVisibility.value as number) > 0.001) {
+                const maxRayEdge = Math.min(2560, maxTex, maxRb);
+                const rayScale = Math.min(1, maxRayEdge / Math.max(targetW, targetH));
+                const rayW = Math.max(1, Math.round(targetW * rayScale));
+                const rayH = Math.max(1, Math.round(targetH * rayScale));
+                const savedBloomEnabled = bloomPass ? bloomPass.enabled : false;
+                const savedStudioEnabled = studioPass ? studioPass.enabled : false;
+                try {
+                  if (bloomPass) bloomPass.enabled = false;
+                  if (studioPass) studioPass.enabled = false;
+                  godRaysPass.uniforms.uRaysOnly.value = 1.0;
+                  renderer.setSize(rayW, rayH, false);
+                  composer.setPixelRatio(1);
+                  composer.setSize(rayW, rayH);
+                  skyMesh.position.copy(activeCamera.position);
+                  composer.render();
+                  outCtx.save();
+                  outCtx.globalCompositeOperation = 'screen';
+                  outCtx.imageSmoothingEnabled = true;
+                  outCtx.drawImage(renderer.domElement, 0, 0, targetW, targetH);
+                  outCtx.restore();
+                } finally {
+                  godRaysPass.uniforms.uRaysOnly.value = 0.0;
+                  if (bloomPass) bloomPass.enabled = savedBloomEnabled;
+                  if (studioPass) studioPass.enabled = savedStudioEnabled;
+                }
+              }
+            }
+
             // The tile path bypasses the composer, so approximate the studio pass
             // in 2D: the vignette and pixelate below mirror the shader versions
             // (applied in sRGB space rather than linear, so the curve differs very
             // slightly at extreme sizes). Chromatic aberration, bloom, and tilt-shift
             // are skipped here; export at ~16 MP or below (e.g. 4K) to keep them.
-            const post = settingsRef.current;
             if (post.vignette > 0.001) {
               const cx = targetW * 0.5;
               const cy = targetH * 0.5;
@@ -2157,6 +2260,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         } finally {
           if (godRaysPass) {
             godRaysPass.uniforms.uSamples.value = 16;
+            godRaysPass.uniforms.uRaysOnly.value = 0.0;
           }
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
