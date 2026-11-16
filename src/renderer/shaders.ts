@@ -151,11 +151,9 @@ export const SHADER_CATEGORIES: { id: ShaderCategory; label: string }[] = [
 
 export const SHADER_PRESETS: ShaderPresetMeta[] = [
   { id: 'atmospheric', category: 'cinematic', label: 'Scenic GI', description: 'Soft sky bounce & aerial mist' },
-  { id: 'pbr', category: 'cinematic', label: 'Studio PBR', description: 'Physical reflections & AO' },
   { id: 'cinema', category: 'cinematic', label: 'Cinema Warm', description: 'Golden sun & teal shadows' },
   { id: 'diorama', category: 'cinematic', label: 'Diorama', description: 'Crisp miniature model bounce' },
   { id: 'voxlap', category: 'cinematic', label: 'Voxlap 2011', description: 'Classic AoS face shading' },
-  { id: 'rim', category: 'cinematic', label: 'Chiaroscuro', description: 'Warm key light & cool rim' },
 ];
 
 export const MAX_VOXEL_SHADOW_CASTERS = 16;
@@ -1162,33 +1160,6 @@ function makeStylizedShader(
         #include <colorspace_fragment>
       }
     `;
-  } else {
-    // rim
-    body = /* glsl */ `
-      void main() {
-        #include <clipping_planes_fragment>
-        vec3 N = normalize(vWorldNormal);
-        vec3 L = normalize(uLightDir);
-        vec3 VN = normalize(vViewNormal);
-        vec3 V = normalize(vViewPos);
-
-        float aoVal = clamp(vAo, 0.0, 1.0);
-        float ao = max(0.0, mix(1.0, aoVal, clamp(uAoStrength * 1.15, 0.0, 1.5)));
-
-        float ndl = max(0.0, dot(N, L));
-        vec3 warmKey = uLightColor * ndl * uLightIntensity;
-        vec3 coolShadow = mix(vec3(0.10, 0.16, 0.28), uSkyColor * 0.22, 0.4) * (1.0 - ndl * 0.5);
-
-        float fresnel = pow(max(0.0001, 1.0 - max(0.0, dot(VN, V))), 2.6);
-        vec3 rimColor = mix(vec3(0.28, 0.68, 1.0), uLightColor, step(0.0, dot(N, L)));
-
-        vec3 col = vColor * (warmKey + coolShadow) * ao + rimColor * fresnel * 0.85;
-
-        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
-        #include <tonemapping_fragment>
-        #include <colorspace_fragment>
-      }
-    `;
   }
 
   return new THREE.ShaderMaterial({
@@ -1201,54 +1172,46 @@ function makeStylizedShader(
 }
 
 export interface MaterialBank {
-  /** Every voxel material (PBR + stylized) for shared material-wide settings. */
+  /** Every voxel material (stylized only) for shared material-wide settings. */
   all: THREE.Material[];
-  pbr: THREE.MeshPhysicalMaterial;
   atmospheric: THREE.ShaderMaterial;
   diorama: THREE.ShaderMaterial;
   cinema: THREE.ShaderMaterial;
   voxlap: THREE.ShaderMaterial;
-  rim: THREE.ShaderMaterial;
   dispose: () => void;
 }
 
 export function createMaterialBank(shared: SharedShaderUniforms): MaterialBank {
-  const pbr = createPbrVoxelMaterial(shared);
   const atmospheric = makeStylizedShader('atmospheric', shared);
   const diorama = makeStylizedShader('diorama', shared);
   const cinema = makeStylizedShader('cinema', shared);
   const voxlap = makeStylizedShader('voxlap', shared);
-  const rim = makeStylizedShader('rim', shared);
 
   // Section slicing is a local clipping plane on every voxel material. three.js
   // injects the (camera-space) `clippingPlanes` uniform itself for materials with
   // `clipping: true`, and applies the same planes in the shadow pass because
   // `clipShadows` is on.
-  const sliced: THREE.Material[] = [pbr, atmospheric, diorama, cinema, voxlap, rim];
+  const sliced: THREE.Material[] = [atmospheric, diorama, cinema, voxlap];
   for (const material of sliced) {
     // ShaderMaterial only receives the projected `clippingPlanes` uniform when
-    // `clipping` is set (MeshPhysicalMaterial is always wired). `clipShadows`
-    // makes the shadow/depth pass honour the same planes.
+    // `clipping` is set. `clipShadows` makes the shadow/depth pass honour the
+    // same planes.
     if (material instanceof THREE.ShaderMaterial) material.clipping = true;
     material.clipShadows = true;
     material.clippingPlanes = [];
   }
 
   return {
-    all: [pbr, atmospheric, diorama, cinema, voxlap, rim],
-    pbr,
+    all: [atmospheric, diorama, cinema, voxlap],
     atmospheric,
     diorama,
     cinema,
     voxlap,
-    rim,
     dispose: () => {
-      pbr.dispose();
       atmospheric.dispose();
       diorama.dispose();
       cinema.dispose();
       voxlap.dispose();
-      rim.dispose();
     },
   };
 }

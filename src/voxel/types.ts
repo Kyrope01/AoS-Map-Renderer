@@ -31,12 +31,10 @@ export interface RegionBounds {
 export type ShaderCategory = 'cinematic';
 
 export type ShaderMode =
-  | 'pbr'
   | 'atmospheric'
   | 'diorama'
   | 'cinema'
-  | 'voxlap'
-  | 'rim';
+  | 'voxlap';
 
 export type BackdropPreset =
   | 'overcast'

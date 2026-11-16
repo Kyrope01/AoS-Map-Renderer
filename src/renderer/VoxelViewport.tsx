@@ -1928,9 +1928,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             obj.material = materials[s.shaderMode];
           }
         });
-        materials.pbr.roughness = s.roughness;
-        materials.pbr.metalness = s.metalness;
-        materials.pbr.clearcoat = s.metalness > 0.35 ? 0.35 : 0.08;
 
         syncSharedUniforms(
           sharedUniforms,

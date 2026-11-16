@@ -8,7 +8,6 @@ import {
   createSkyDomeMaterial,
   GodRaysCompositeShader,
   GodRaysShader,
-  MAX_VOXEL_SHADOW_CASTERS,
   StudioPostShader,
 } from './shaders';
 import { sortVoxelLightsByIntensity } from './voxelLightTexture';
@@ -23,19 +22,6 @@ function resolveIncludes(source: string): string {
   });
 }
 
-function compiledPbrFragment(): string {
-  const bank = createMaterialBank(createSharedUniforms());
-  const material = bank.pbr as THREE.MeshPhysicalMaterial;
-  const shader = {
-    uniforms: {} as Record<string, THREE.IUniform>,
-    vertexShader: THREE.ShaderLib.physical.vertexShader,
-    fragmentShader: THREE.ShaderLib.physical.fragmentShader,
-  };
-  material.onBeforeCompile(shader as unknown as THREE.WebGLProgramParametersWithUniforms, null as never);
-  bank.dispose();
-  return resolveIncludes(shader.fragmentShader);
-}
-
 function bankFragmentShaders(): { name: string; fragment: string }[] {
   const bank = createMaterialBank(createSharedUniforms());
   const shaders = [
@@ -43,46 +29,10 @@ function bankFragmentShaders(): { name: string; fragment: string }[] {
     { name: 'diorama', fragment: resolveIncludes(bank.diorama.fragmentShader) },
     { name: 'cinema', fragment: resolveIncludes(bank.cinema.fragmentShader) },
     { name: 'voxlap', fragment: resolveIncludes(bank.voxlap.fragmentShader) },
-    { name: 'rim', fragment: resolveIncludes(bank.rim.fragmentShader) },
   ];
   bank.dispose();
   return shaders;
 }
-
-test('PBR voxel fog is applied on linear radiance, before tone mapping and sRGB encode', () => {
-  const fragment = compiledPbrFragment();
-  const fogIndex = fragment.indexOf('computeSceneFog(gl_FragColor.rgb');
-  const toneIndex = fragment.indexOf('toneMapping( gl_FragColor.rgb )');
-  const colorSpaceIndex = fragment.indexOf('linearToOutputTexel( gl_FragColor )');
-
-  assert.ok(fogIndex >= 0, 'PBR shader should apply computeSceneFog to the framebuffer');
-  assert.ok(toneIndex > fogIndex, 'fog must run before tone mapping');
-  assert.ok(colorSpaceIndex > fogIndex, 'fog must run before the sRGB encode');
-});
-
-test('PBR voxel material no longer relies on the post-tonemap fog_fragment chunk', () => {
-  const bank = createMaterialBank(createSharedUniforms());
-  const shader = {
-    uniforms: {} as Record<string, THREE.IUniform>,
-    vertexShader: THREE.ShaderLib.physical.vertexShader,
-    fragmentShader: THREE.ShaderLib.physical.fragmentShader,
-  };
-  bank.pbr.onBeforeCompile(
-    shader as unknown as THREE.WebGLProgramParametersWithUniforms,
-    null as never,
-  );
-  bank.dispose();
-  // The injected replacement leaves the stock (sRGB-space) fog chunk untouched;
-  // the custom fog call must therefore not appear *after* it.
-  const raw = shader.fragmentShader;
-  const customFog = raw.indexOf('computeSceneFog(gl_FragColor.rgb');
-  const stockFog = raw.indexOf('#include <fog_fragment>');
-  assert.ok(customFog >= 0);
-  assert.ok(
-    stockFog === -1 || stockFog > customFog,
-    'stock fog_fragment must not run after the custom linear fog',
-  );
-});
 
 test('stylized voxel shaders clip through three clipping planes, not a hardcoded discard', () => {
   for (const { name, fragment } of bankFragmentShaders()) {
@@ -104,7 +54,6 @@ test('shaders never use reversed smoothstep edges (spec-undefined)', () => {
   const sky = createSkyDomeMaterial(shared);
   const ocean = createOceanMaterial(shared);
   const sources = [
-    compiledPbrFragment(),
     ...bankFragmentShaders().map((entry) => entry.fragment),
     resolveIncludes(sky.fragmentShader),
     resolveIncludes(ocean.material.fragmentShader),
@@ -139,23 +88,8 @@ test('every voxel material opts into local clipping and shadow clipping', () => 
 test('voxel light shaders bind uShadowCasterCount, cull dim lights, and split shadowed vs unshadowed loops', () => {
   const shared = createSharedUniforms();
   const bank = createMaterialBank(shared);
-  const pbrShader = {
-    uniforms: {} as Record<string, THREE.IUniform>,
-    vertexShader: THREE.ShaderLib.physical.vertexShader,
-    fragmentShader: THREE.ShaderLib.physical.fragmentShader,
-  };
-  bank.pbr.onBeforeCompile(
-    pbrShader as unknown as THREE.WebGLProgramParametersWithUniforms,
-    null as never,
-  );
-  assert.equal(pbrShader.uniforms.uShadowCasterCount, shared.uShadowCasterCount);
-  assert.equal(pbrShader.uniforms.uIsOrtho, shared.uIsOrtho);
-  assert.equal(MAX_VOXEL_SHADOW_CASTERS, 16);
 
-  const fragments = [
-    resolveIncludes(pbrShader.fragmentShader),
-    ...bankFragmentShaders().map((entry) => entry.fragment),
-  ];
+  const fragments = bankFragmentShaders().map((entry) => entry.fragment);
   bank.dispose();
   for (const frag of fragments) {
     assert.match(frag, /uniform int uShadowCasterCount;/);

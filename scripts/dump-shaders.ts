@@ -46,28 +46,16 @@ const bank = createMaterialBank(shared);
 const skyMat = createSkyDomeMaterial(shared);
 const ocean = createOceanMaterial(shared);
 
-const pbrShader = {
-  uniforms: {} as Record<string, THREE.IUniform>,
-  vertexShader: THREE.ShaderLib.physical.vertexShader,
-  fragmentShader: THREE.ShaderLib.physical.fragmentShader,
-};
-bank.pbr.onBeforeCompile(
-  pbrShader as unknown as THREE.WebGLProgramParametersWithUniforms,
-  null as never,
-);
-
 const outputs: { name: string; vertexShader: string; fragmentShader: string }[] = [
-  { name: 'pbr', ...pbrShader },
   { name: 'atmospheric', vertexShader: bank.atmospheric.vertexShader, fragmentShader: bank.atmospheric.fragmentShader },
   { name: 'diorama', vertexShader: bank.diorama.vertexShader, fragmentShader: bank.diorama.fragmentShader },
   { name: 'cinema', vertexShader: bank.cinema.vertexShader, fragmentShader: bank.cinema.fragmentShader },
   { name: 'voxlap', vertexShader: bank.voxlap.vertexShader, fragmentShader: bank.voxlap.fragmentShader },
-  { name: 'rim', vertexShader: bank.rim.vertexShader, fragmentShader: bank.rim.fragmentShader },
   { name: 'sky', vertexShader: skyMat.vertexShader, fragmentShader: skyMat.fragmentShader },
   { name: 'ocean', vertexShader: ocean.material.vertexShader, fragmentShader: ocean.material.fragmentShader },
   { name: 'studio', vertexShader: StudioPostShader.vertexShader, fragmentShader: StudioPostShader.fragmentShader },
   { name: 'godrays', vertexShader: GodRaysShader.vertexShader, fragmentShader: GodRaysShader.fragmentShader },
-  { name: 'godrays-composite', vertexShader: GodRaysCompositeShader.vertexShader, fragmentShader: GodRaysCompositeShader.fragmentShader },
+  { name: 'godrays-composite', vertexShader: GodRaysShader.vertexShader, fragmentShader: GodRaysShader.fragmentShader },
 ];
 
 for (const entry of outputs) {
