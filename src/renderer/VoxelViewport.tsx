@@ -48,10 +48,10 @@ import {
   MAX_VOXEL_SHADOW_CASTERS,
   SharedShaderUniforms,
   StudioPostShader,
-  GodRaysShader,
   syncSharedUniforms,
 } from './shaders';
 import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
+import { VolumetricGodRaysPass } from './volumetricGodRaysPass';
 
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
@@ -302,7 +302,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       renderer.setPixelRatio(isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
       renderer.setSize(width, height);
       renderer.shadowMap.enabled = !isSoftwareGl;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
       renderer.shadowMap.autoUpdate = false;
       renderer.shadowMap.needsUpdate = true;
       renderer.domElement.style.display = 'block';
@@ -389,8 +389,11 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
       const keyLight = new THREE.DirectionalLight(settingsRef.current.sunColor, 1.3);
       keyLight.castShadow = !isSoftwareGl;
-      keyLight.shadow.mapSize.width = 2048;
-      keyLight.shadow.mapSize.height = 2048;
+      const shadowMapRes = isSoftwareGl
+        ? 1024
+        : Math.min(4096, renderer.capabilities.maxTextureSize || 4096);
+      keyLight.shadow.mapSize.width = shadowMapRes;
+      keyLight.shadow.mapSize.height = shadowMapRes;
       keyLight.shadow.bias = -0.0005;
       keyLight.shadow.normalBias = 0.02;
       scene.add(keyLight);
@@ -1118,19 +1121,42 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         return projectWorldToScreen(markerPosition.x, markerPosition.y, markerPosition.z);
       };
 
-      // Post-Processing Composer (GPU only; crisp high-threshold bloom)
+      // Post-Processing Composer (GPU only; crisp high-threshold bloom + 3D volumetric god rays)
       let composer: EffectComposer | null = null;
       let renderPass: RenderPass | null = null;
-      let godRaysPass: ShaderPass | null = null;
+      let godRaysPass: VolumetricGodRaysPass | null = null;
       let bloomPass: UnrealBloomPass | null = null;
       let studioPass: ShaderPass | null = null;
       let outputPass: OutputPass | null = null;
 
       if (!isSoftwareGl) {
-        composer = new EffectComposer(renderer);
+        const initialPixelRatio = renderer.getPixelRatio();
+        const rtW = Math.max(1, Math.round(width * initialPixelRatio));
+        const rtH = Math.max(1, Math.round(height * initialPixelRatio));
+        const createDepthTexture = (dw: number, dh: number) => {
+          const dt = new THREE.DepthTexture(dw, dh, THREE.UnsignedIntType);
+          dt.format = THREE.DepthFormat;
+          dt.minFilter = THREE.NearestFilter;
+          dt.magFilter = THREE.NearestFilter;
+          return dt;
+        };
+        const composerRt = new THREE.WebGLRenderTarget(rtW, rtH, {
+          type: THREE.HalfFloatType,
+          depthBuffer: true,
+          depthTexture: createDepthTexture(rtW, rtH),
+        });
+        composer = new EffectComposer(renderer, composerRt);
+        composer.setSize(width, height);
+        composer.renderTarget2.depthTexture = createDepthTexture(rtW, rtH);
+
         renderPass = new RenderPass(scene, activeCamera);
         composer.addPass(renderPass);
-        godRaysPass = new ShaderPass(GodRaysShader);
+        godRaysPass = new VolumetricGodRaysPass(
+          rtW,
+          rtH,
+          () => activeCamera,
+          keyLight,
+        );
         godRaysPass.enabled = settingsRef.current.godRays;
         composer.addPass(godRaysPass);
         bloomPass = new UnrealBloomPass(
@@ -1138,15 +1164,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         );
         composer.addPass(bloomPass);
         studioPass = new ShaderPass(StudioPostShader);
-        const initialPixelRatio = renderer.getPixelRatio();
-        bloomPass.resolution.set(
-          Math.round(width * initialPixelRatio),
-          Math.round(height * initialPixelRatio),
-        );
-        studioPass.uniforms.uResolution.value.set(
-          Math.round(width * initialPixelRatio),
-          Math.round(height * initialPixelRatio),
-        );
+        bloomPass.resolution.set(rtW, rtH);
+        studioPass.uniforms.uResolution.value.set(rtW, rtH);
         composer.addPass(studioPass);
         outputPass = new OutputPass();
         composer.addPass(outputPass);
@@ -1226,28 +1245,23 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let lastTime = performance.now();
       let elapsedSec = 1.4;
 
-      const _godRaySunWorld = new THREE.Vector3();
-      const _godRayCamDir = new THREE.Vector3();
+      const _godRaySunColor = new THREE.Color();
 
       const syncGodRaysPass = () => {
         if (!godRaysPass) return;
         const s = settingsRef.current;
-        const enabled = s.godRays;
+        const enabled = s.godRays && s.godRaysIntensity > 0.001;
         godRaysPass.enabled = enabled;
         if (enabled) {
-          const sunDir = _godRaySunWorld.copy(sharedUniforms.uLightDir.value).normalize();
-          activeCamera.getWorldDirection(_godRayCamDir);
-          const facing = _godRayCamDir.dot(sunDir);
-          godRaysPass.uniforms.uVisibility.value = THREE.MathUtils.smoothstep(facing, -0.15, 0.25);
-          _godRaySunWorld.multiplyScalar(5200).add(activeCamera.position);
-          _godRaySunWorld.project(activeCamera);
-          godRaysPass.uniforms.uLightPos.value.set(
-            _godRaySunWorld.x * 0.5 + 0.5,
-            _godRaySunWorld.y * 0.5 + 0.5,
-          );
           const theme = BACKDROP_THEMES[s.backdrop];
-          godRaysPass.uniforms.uSunColor.value.set(s.sunColor || theme.defaultSunHex);
-          godRaysPass.uniforms.uIntensity.value = s.godRaysIntensity;
+          _godRaySunColor.set(s.sunColor || theme.defaultSunHex);
+          godRaysPass.syncSceneParams({
+            lightDir: sharedUniforms.uLightDir.value,
+            sunColor: _godRaySunColor,
+            intensity: s.godRaysIntensity,
+            modelBounds,
+            modelRadius,
+          });
         }
       };
 
@@ -1812,6 +1826,59 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const isInsideSlice = (worldX: number, worldY: number, worldZ: number): boolean =>
         !sliceActive || pointInsideSlice(slicePlane, worldX, worldY, worldZ);
 
+      const _shadowCorner = new THREE.Vector3();
+      const fitKeyLightShadowCamera = () => {
+        keyLight.updateMatrixWorld(true);
+        keyLight.target.updateMatrixWorld(true);
+        const shadowCam = keyLight.shadow.camera;
+        shadowCam.position.copy(keyLight.position);
+        shadowCam.lookAt(keyLight.target.position);
+        shadowCam.updateMatrixWorld(true);
+        const lightView = shadowCam.matrixWorldInverse;
+
+        const padXZ = Math.max(8, modelRadius * 0.06);
+        const padTop = Math.max(8, (modelBounds.max.y - modelBounds.min.y) * 0.25);
+        const minX = modelBounds.min.x - padXZ;
+        const maxX = modelBounds.max.x + padXZ;
+        const minY = modelBounds.min.y - 4;
+        const maxY = modelBounds.max.y + padTop;
+        const minZ = modelBounds.min.z - padXZ;
+        const maxZ = modelBounds.max.z + padXZ;
+
+        let lMinX = Infinity;
+        let lMaxX = -Infinity;
+        let lMinY = Infinity;
+        let lMaxY = -Infinity;
+        let lMinZ = Infinity;
+        let lMaxZ = -Infinity;
+
+        for (let ix = 0; ix < 2; ix++) {
+          for (let iy = 0; iy < 2; iy++) {
+            for (let iz = 0; iz < 2; iz++) {
+              _shadowCorner
+                .set(ix ? maxX : minX, iy ? maxY : minY, iz ? maxZ : minZ)
+                .applyMatrix4(lightView);
+              if (_shadowCorner.x < lMinX) lMinX = _shadowCorner.x;
+              if (_shadowCorner.x > lMaxX) lMaxX = _shadowCorner.x;
+              if (_shadowCorner.y < lMinY) lMinY = _shadowCorner.y;
+              if (_shadowCorner.y > lMaxY) lMaxY = _shadowCorner.y;
+              if (_shadowCorner.z < lMinZ) lMinZ = _shadowCorner.z;
+              if (_shadowCorner.z > lMaxZ) lMaxZ = _shadowCorner.z;
+            }
+          }
+        }
+
+        shadowCam.left = lMinX - 4;
+        shadowCam.right = lMaxX + 4;
+        shadowCam.bottom = lMinY - 4;
+        shadowCam.top = lMaxY + 4;
+        shadowCam.near = Math.max(1, -lMaxZ - 32);
+        // Extend `far` downwind so 3D volumetric light shafts emerging from
+        // buildings near the map edge stay inside shadow depth [0, 1].
+        shadowCam.far = Math.max(shadowCam.near + 64, -lMinZ + 240);
+        shadowCam.updateProjectionMatrix();
+      };
+
       const syncSettings = () => {
         const s = settingsRef.current;
         const theme = BACKDROP_THEMES[s.backdrop];
@@ -1841,6 +1908,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         keyLight.position.copy(_lightDir).multiplyScalar(lightDist);
         keyLight.position.y += modelCenterY;
         keyLight.target.position.set(0, modelCenterY * 0.4, 0);
+        fitKeyLightShadowCamera();
 
         if (s.lightAzimuth !== lastLightAz || s.lightElevation !== lastLightEl) {
           lastLightAz = s.lightAzimuth;
@@ -2016,14 +2084,19 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         modelRadius = Math.max(6, Math.hypot(sx, sy, sz) * 0.5);
         modelCenterY = sy * 0.5;
 
-        const d = Math.max(16, modelRadius * 1.45);
-        keyLight.shadow.camera.left = -d;
-        keyLight.shadow.camera.right = d;
-        keyLight.shadow.camera.top = d;
-        keyLight.shadow.camera.bottom = -d;
-        keyLight.shadow.camera.near = 1;
-        keyLight.shadow.camera.far = Math.max(200, d * 6);
-        keyLight.shadow.camera.updateProjectionMatrix();
+        const lightAz = THREE.MathUtils.degToRad(settingsRef.current.lightAzimuth);
+        const lightEl = THREE.MathUtils.degToRad(settingsRef.current.lightElevation);
+        _lightDir
+          .set(
+            Math.cos(lightEl) * Math.sin(lightAz),
+            Math.sin(lightEl),
+            Math.cos(lightEl) * Math.cos(lightAz),
+          )
+          .normalize();
+        keyLight.position.copy(_lightDir).multiplyScalar(Math.max(60, modelRadius * 2.6));
+        keyLight.position.y += modelCenterY;
+        keyLight.target.position.set(0, modelCenterY * 0.4, 0);
+        fitKeyLightShadowCamera();
 
         const footprint = Math.max(sx, sz);
         const shadowSize = Math.max(12, footprint * 1.55);
@@ -2084,10 +2157,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const baseW = Math.max(1, renderer.domElement.width);
         const baseH = Math.max(1, renderer.domElement.height);
 
-        if (godRaysPass) {
-          godRaysPass.uniforms.uSamples.value = 96;
-          godRaysPass.uniforms.uRaysOnly.value = 0.0;
-        }
+        godRaysPass?.setQualityMode(true);
 
         try {
           if (!targetWidth || targetWidth <= baseW) {
@@ -2180,65 +2250,49 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             const tileCap = isSoftwareGl ? 1024 : Math.min(2048, maxTex, maxRb);
             const tiles = computeExportTiles(targetW, targetH, tileCap);
 
+            const post = settingsRef.current;
+            const useTiledVolumetricRays =
+              post.godRays && post.godRaysIntensity > 0.001 && Boolean(composer && godRaysPass) && !isSoftwareGl;
+            const savedBloomEnabled = bloomPass ? bloomPass.enabled : false;
+            const savedStudioEnabled = studioPass ? studioPass.enabled : false;
+
             renderer.setPixelRatio(1);
-            for (let i = 0; i < tiles.length; i++) {
-              const tile = tiles[i];
-              renderer.setSize(tile.width, tile.height, false);
-              activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
-              skyMesh.position.copy(activeCamera.position);
-              // Direct render, deliberately not the composer: the composer's
-              // offscreen targets are sized to the viewport, so reusing it per tile
-              // would scale/crop the frame. The studio pass is approximated in 2D
-              // on the assembled image below instead.
-              renderer.render(scene, activeCamera);
-              outCtx.drawImage(renderer.domElement, tile.x, tile.y);
-              if (i % 4 === 3) {
-                await new Promise((r) => window.setTimeout(r, 0));
-              }
+            if (useTiledVolumetricRays && composer) {
+              composer.setPixelRatio(1);
+              if (bloomPass) bloomPass.enabled = false;
+              if (studioPass) studioPass.enabled = false;
+              syncGodRaysPass();
             }
 
-            const post = settingsRef.current;
-
-            // Radial god rays span the full frame toward `uLightPos` (which lies
-            // outside individual tiles), so render a dedicated full-frame rays-only
-            // pass at up to 2560px and composite it smoothly over the 8K/16K tiles.
-            if (post.godRays && post.godRaysIntensity > 0.001 && composer && godRaysPass && !isSoftwareGl) {
-              activeCamera.clearViewOffset();
-              syncGodRaysPass();
-              if ((godRaysPass.uniforms.uVisibility.value as number) > 0.001) {
-                const maxRayEdge = Math.min(2560, maxTex, maxRb);
-                const rayScale = Math.min(1, maxRayEdge / Math.max(targetW, targetH));
-                const rayW = Math.max(1, Math.round(targetW * rayScale));
-                const rayH = Math.max(1, Math.round(targetH * rayScale));
-                const savedBloomEnabled = bloomPass ? bloomPass.enabled : false;
-                const savedStudioEnabled = studioPass ? studioPass.enabled : false;
-                try {
-                  if (bloomPass) bloomPass.enabled = false;
-                  if (studioPass) studioPass.enabled = false;
-                  godRaysPass.uniforms.uRaysOnly.value = 1.0;
-                  renderer.setSize(rayW, rayH, false);
-                  composer.setPixelRatio(1);
-                  composer.setSize(rayW, rayH);
-                  skyMesh.position.copy(activeCamera.position);
+            try {
+              for (let i = 0; i < tiles.length; i++) {
+                const tile = tiles[i];
+                renderer.setSize(tile.width, tile.height, false);
+                activeCamera.setViewOffset(targetW, targetH, tile.x, tile.y, tile.width, tile.height);
+                skyMesh.position.copy(activeCamera.position);
+                if (useTiledVolumetricRays && composer) {
+                  // 3D volumetric god rays only depend on each pixel's world ray and
+                  // the world-space directional shadow map, so rendering per-tile gives
+                  // seamless native-8K/16K volumetric shafts.
+                  composer.setSize(tile.width, tile.height);
                   composer.render();
-                  outCtx.save();
-                  outCtx.globalCompositeOperation = 'screen';
-                  outCtx.imageSmoothingEnabled = true;
-                  outCtx.drawImage(renderer.domElement, 0, 0, targetW, targetH);
-                  outCtx.restore();
-                } finally {
-                  godRaysPass.uniforms.uRaysOnly.value = 0.0;
-                  if (bloomPass) bloomPass.enabled = savedBloomEnabled;
-                  if (studioPass) studioPass.enabled = savedStudioEnabled;
+                } else {
+                  renderer.render(scene, activeCamera);
+                }
+                outCtx.drawImage(renderer.domElement, tile.x, tile.y);
+                if (i % 4 === 3) {
+                  await new Promise((r) => window.setTimeout(r, 0));
                 }
               }
+            } finally {
+              if (useTiledVolumetricRays) {
+                if (bloomPass) bloomPass.enabled = savedBloomEnabled;
+                if (studioPass) studioPass.enabled = savedStudioEnabled;
+              }
             }
 
-            // The tile path bypasses the composer, so approximate the studio pass
-            // in 2D: the vignette and pixelate below mirror the shader versions
-            // (applied in sRGB space rather than linear, so the curve differs very
-            // slightly at extreme sizes). Chromatic aberration, bloom, and tilt-shift
-            // are skipped here; export at ~16 MP or below (e.g. 4K) to keep them.
+            // The tile path bypasses the studio pass, so approximate vignette and
+            // pixelate in 2D on the assembled canvas.
             if (post.vignette > 0.001) {
               const cx = targetW * 0.5;
               const cy = targetH * 0.5;
@@ -2258,10 +2312,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             restoreRendererSize();
           }
         } finally {
-          if (godRaysPass) {
-            godRaysPass.uniforms.uSamples.value = 16;
-            godRaysPass.uniforms.uRaysOnly.value = 0.0;
-          }
+          godRaysPass?.setQualityMode(false);
           markerGroup.visible = savedMarkerVisible;
           hoverBox.visible = savedHoverVisible;
           playerHelperGroup.visible = savedPlayerHelpersVisible;
@@ -2530,8 +2581,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         outputPass?.dispose();
         bloomPass?.dispose();
         studioPass?.dispose();
+        godRaysPass?.dispose();
         renderPass?.dispose();
-        if (composer) composer.dispose();
+        if (composer) {
+          composer.renderTarget1.depthTexture?.dispose();
+          composer.renderTarget2.depthTexture?.dispose();
+          composer.dispose();
+        }
         renderer.dispose();
         if (renderer.domElement.parentNode === container) {
           container.removeChild(renderer.domElement);

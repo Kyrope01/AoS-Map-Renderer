@@ -17,6 +17,7 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  GodRaysCompositeShader,
   GodRaysShader,
   StudioPostShader,
 } from '../src/renderer/shaders';
@@ -66,6 +67,7 @@ const outputs: { name: string; vertexShader: string; fragmentShader: string }[] 
   { name: 'ocean', vertexShader: ocean.material.vertexShader, fragmentShader: ocean.material.fragmentShader },
   { name: 'studio', vertexShader: StudioPostShader.vertexShader, fragmentShader: StudioPostShader.fragmentShader },
   { name: 'godrays', vertexShader: GodRaysShader.vertexShader, fragmentShader: GodRaysShader.fragmentShader },
+  { name: 'godrays-composite', vertexShader: GodRaysCompositeShader.vertexShader, fragmentShader: GodRaysCompositeShader.fragmentShader },
 ];
 
 for (const entry of outputs) {
