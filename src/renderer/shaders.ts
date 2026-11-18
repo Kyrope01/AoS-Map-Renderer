@@ -846,32 +846,26 @@ export const PLAYER_FLASHLIGHT_GLSL = /* glsl */ `
   uniform float uFlashlightId;
 
   vec3 flashlightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
-    if (uFlashlightEnabled <= 0) return vec3(0.0);
+    if (uFlashlightEnabled <= 0 || uFlashlightReach <= 0.0 || uFlashlightIntensity <= 0.0) return vec3(0.0);
     vec3 fromLight = worldPos - uFlashlightPos;
     float dist = length(fromLight);
     if (dist >= uFlashlightReach) return vec3(0.0);
     vec3 rayDir = fromLight / max(dist, 0.0001);
     float cone = dot(rayDir, normalize(uFlashlightDir));
     float cosOuter = min(uFlashlightConeCos, 0.999);
+    if (cone <= cosOuter) return vec3(0.0);
     // Main beam: full-range ramp, zero slope at the edge (soft boundary).
     float beam = smoothstep(cosOuter, 1.0, cone);
     // Gentle hotspot boost toward the axis; does not touch the outer edge.
     float cosHot = mix(cosOuter, 1.0, 0.6);
-    beam *= 0.8 + 0.2 * smoothstep(cosHot, 1.0, cone);
-    // Spill: faint halo past the reflector edge so light diffuses instead of
-    // stopping. The min() guarantees edge0 < edge1 even at cone = 255.
-    float halfAngle = acos(cosOuter);
-    float cosSpill = min(cos(min(halfAngle * 1.8, 1.45)), cosOuter - 0.001);
-    float spill = smoothstep(cosSpill, cosOuter, cone) * (1.0 - beam) * 0.12;
-    float coneFactor = beam + spill;
-    if (coneFactor <= 0.0) return vec3(0.0);
+    beam *= 0.75 + 0.25 * smoothstep(cosHot, 1.0, cone);
     float diffuse = max(dot(worldNormal, -rayDir), 0.0);
     if (diffuse <= 0.0) return vec3(0.0);
     // Zero slope at both ends: gentler near-field, softer far tail than (1-x)^2.
     float range = 1.0 - smoothstep(0.0, uFlashlightReach, dist);
-    float contrib = coneFactor * diffuse * range;
+    float contrib = beam * diffuse * range * uFlashlightIntensity;
     if (contrib < 0.004) return vec3(0.0);
-    return albedo * uFlashlightColor * contrib * uFlashlightIntensity;
+    return albedo * uFlashlightColor * contrib;
   }
 `;
 

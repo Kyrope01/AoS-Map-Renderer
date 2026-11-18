@@ -575,14 +575,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       scene.add(voxelMesh);
 
       // Visible flashlight beam cone (volumetric-style).
-      // Three additive, rim-faded shells (hotspot + main beam + wide spill)
-      // approximate a smooth radial profile so the beam dissolves gradually
-      // instead of ending at a hard geometric line.
+      // Two concentric additive, rim-faded shells strictly within halfAngle
+      // (hotspot + main beam) so the visible beam matches the spotlight cone
+      // without drawing an extra cone outside the main cone.
       const flashlightConeGeo = new THREE.ConeGeometry(1, 1, 64, 8, true);
       const FLASHLIGHT_BEAM_LAYERS = [
-        { angleScale: 0.45, reachScale: 1.0, opacityScale: 1.0, rim: 0.5 },
-        { angleScale: 1.0, reachScale: 1.0, opacityScale: 0.5, rim: 0.65 },
-        { angleScale: 1.65, reachScale: 0.8, opacityScale: 0.16, rim: 0.85 },
+        { angleScale: 0.5, reachScale: 1.0, opacityScale: 0.85, rim: 0.65 },
+        { angleScale: 1.0, reachScale: 1.0, opacityScale: 0.5, rim: 0.8 },
       ] as const;
       const flashlightBeamLayers = FLASHLIGHT_BEAM_LAYERS.map((layer) => {
         const mat = new THREE.ShaderMaterial({
@@ -1325,7 +1324,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           );
           sharedUniforms.uFlashlightReach.value = fl.reach;
           sharedUniforms.uFlashlightConeCos.value = Math.cos((fl.cone * Math.PI) / 512);
-          sharedUniforms.uFlashlightIntensity.value = 6.0 + (fl.intensity / 255) * 1194.0;
+          sharedUniforms.uFlashlightIntensity.value = (fl.intensity / 255) * 8.0;
           sharedUniforms.uFlashlightTime.value = elapsedSec;
           sharedUniforms.uFlashlightId.value = flashlightPlayer.id.charCodeAt(0) + flashlightPlayer.id.charCodeAt(1) * 31 + flashlightPlayer.id.charCodeAt(2) * 961;
 
@@ -1333,9 +1332,14 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           const halfAngle = Math.acos(
             THREE.MathUtils.clamp(sharedUniforms.uFlashlightConeCos.value, -1, 1),
           );
-          const baseOpacity = 0.08 + (fl.intensity / 255) * 0.22;
+          const baseOpacity = (fl.intensity / 255) * 0.28;
+          const beamVisible = fl.reach > 0 && fl.intensity > 0;
           _beamAxis.copy(_flashlightDir).negate();
           for (const layer of flashlightBeamLayers) {
+            if (!beamVisible) {
+              layer.mesh.visible = false;
+              continue;
+            }
             // Cap prevents tan() blowup: cone = 255 is already ~89.6 deg half-angle.
             const layerHalf = Math.min(halfAngle * layer.angleScale, Math.PI * 0.46);
             const layerReach = fl.reach * layer.reachScale;

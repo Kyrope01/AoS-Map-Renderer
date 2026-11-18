@@ -144,7 +144,9 @@ test('flashlight beam rim fade uses one space and scale-correct normals', () => 
   assert.match(FLASHLIGHT_BEAM_FRAGMENT, /dot\(N, V\)/);
 });
 
-test('flashlight spill band keeps smoothstep edges ordered at max cone', () => {
-  assert.match(PLAYER_FLASHLIGHT_GLSL, /cosOuter - 0\.001/);
+test('flashlight stays confined within cosOuter and scales contrib before cutoff', () => {
+  assert.match(PLAYER_FLASHLIGHT_GLSL, /if \(cone <= cosOuter\) return vec3\(0\.0\);/);
+  assert.doesNotMatch(PLAYER_FLASHLIGHT_GLSL, /cosSpill/);
+  assert.match(PLAYER_FLASHLIGHT_GLSL, /float contrib = beam \* diffuse \* range \* uFlashlightIntensity;/);
 });
 
