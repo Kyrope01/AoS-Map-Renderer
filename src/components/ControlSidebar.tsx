@@ -15,7 +15,6 @@ import * as THREE from 'three';
 import { BACKDROP_THEMES, SHADER_CATEGORIES, SHADER_PRESETS } from '../renderer/shaders';
 import {
   BackdropPreset,
-  FogMode,
   MAX_SPAWNED_PLAYERS,
   MAX_VOXEL_LIGHTS,
   MeshStats,
@@ -59,11 +58,6 @@ const SUN_SWATCHES = [
   { label: 'Sunset', hex: '#FF9068' },
   { label: 'Overcast', hex: '#DCEBFF' },
   { label: 'Moonlight', hex: '#B5D2FF' },
-];
-
-const FOG_MODES: { id: FogMode; label: string }[] = [
-  { id: 'ingame', label: 'In-Game AoS' },
-  { id: 'atmospheric', label: 'Atmospheric' },
 ];
 
 interface SliderControlProps {
@@ -1114,7 +1108,7 @@ export function ControlSidebar({
                 id="light-int"
                 label="Intensity"
                 value={settings.lightIntensity}
-                min={0.3}
+                min={0}
                 max={2.4}
                 step={0.05}
                 displayValue={settings.lightIntensity.toFixed(2)}
@@ -1125,34 +1119,17 @@ export function ControlSidebar({
             {/* Distance Fog */}
             <div className={`pt-3 border-t space-y-2.5 ${dividerClass}`}>
               <span className={sectionLabel}>Distance Fog</span>
-              <div className="grid grid-cols-2 gap-1.5">
-                {FOG_MODES.map((fm) => (
-                  <button
-                    key={fm.id}
-                    type="button"
-                    aria-pressed={settings.fogMode === fm.id}
-                    onClick={() => onUpdateSettings({ fogMode: fm.id })}
-                    className={`px-2 py-1.5 rounded border text-[11px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
-                      settings.fogMode === fm.id ? activeBtn : inactiveBtn
-                    }`}
-                  >
-                    {fm.label}
-                  </button>
-                ))}
-              </div>
 
-              {settings.fogMode === 'ingame' && (
-                <SliderControl
-                  id="fog-range"
-                  label="Fog Distance"
-                  value={settings.fogRange}
-                  min={40}
-                  max={900}
-                  step={10}
-                  displayValue={`${settings.fogRange} vox`}
-                  onChange={(v) => onUpdateSettings({ fogRange: v })}
-                />
-              )}
+              <SliderControl
+                id="fog-range"
+                label="Fog Distance"
+                value={settings.fogRange}
+                min={40}
+                max={900}
+                step={10}
+                displayValue={`${settings.fogRange} vox`}
+                onChange={(v) => onUpdateSettings({ fogRange: v })}
+              />
 
               <SliderControl
                 id="fog-density"
@@ -1163,17 +1140,6 @@ export function ControlSidebar({
                 step={0.05}
                 displayValue={`${Math.round(settings.fogDensity * 100)}%`}
                 onChange={(v) => onUpdateSettings({ fogDensity: v })}
-              />
-
-              <SliderControl
-                id="height-fog"
-                label="Valley Mist"
-                value={settings.heightFog}
-                min={0}
-                max={1}
-                step={0.02}
-                displayValue={`${Math.round(settings.heightFog * 100)}%`}
-                onChange={(v) => onUpdateSettings({ heightFog: v })}
               />
 
               <div className="flex items-center justify-between gap-2 pt-0.5">

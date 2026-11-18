@@ -56,7 +56,7 @@ const DEFAULT_SETTINGS: RenderSettings = {
   fogSyncSky: true,
   fogDensity: 1.0,
   fogRange: 320,
-  heightFog: 0.2,
+  heightFog: 0,
   volumetricClouds: false,
   volumetricStrength: 0.85,
   cloudAltitude: 0.34,

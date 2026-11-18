@@ -455,8 +455,8 @@ export const DEFAULT_PLAYER_FLASHLIGHT: SpawnedPlayer['flashlight'] = {
   reach: 60,
   cone: 90,
   red: 255,
-  green: 179,
-  blue: 128,
+  green: 252,
+  blue: 250,
   intensity: 255,
 };
 
@@ -484,15 +484,7 @@ export function createSpawnedPlayer(
     style: overrides?.style ?? 'classic',
     teamColor: overrides?.teamColor ?? defaultTeamColor,
     blockColor: overrides?.blockColor ?? '#7F5539',
-    flashlight: {
-      enabled: false,
-      reach: 60,
-      cone: 90,
-      red: 255,
-      green: 179,
-      blue: 128,
-      intensity: 255,
-    },
+    flashlight: { ...DEFAULT_PLAYER_FLASHLIGHT },
   };
 }
 

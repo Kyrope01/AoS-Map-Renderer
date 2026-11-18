@@ -583,7 +583,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const flashlightBeamLayers = FLASHLIGHT_BEAM_LAYERS.map((layer) => {
         const mat = new THREE.ShaderMaterial({
           uniforms: {
-            uBeamColor: { value: new THREE.Color(0xffb380) },
+            uBeamColor: { value: new THREE.Color(0xfffcfa) },
             uBeamOpacity: { value: 0.25 * layer.opacityScale },
             uBeamRimSoftness: { value: layer.rim },
           },
