@@ -542,7 +542,8 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
           float coreHalo = pow(sunDot, 120.0) * 0.85;
           float disc = smoothstep(0.9988, 0.9996, sunDot) * 2.2;
           float aboveHorizon = smoothstep(-0.06, 0.08, dir.y);
-          sky += uLightColor * (halo + coreHalo + disc) * aboveHorizon;
+          float sunStrength = max(uLightIntensity, 0.0) / 1.3;
+          sky += uLightColor * (halo + coreHalo + disc) * aboveHorizon * sunStrength;
         }
 
         // Apply scene distance fog across the lower sky so distant fogged voxels,
