@@ -166,6 +166,16 @@ export interface SpawnedPlayer {
   teamColor: string;
   /** Hex color for held Block tool (0,0,0 sentinel in Block.kv6). */
   blockColor: string;
+  /** Flashlight state */
+  flashlight: {
+    enabled: boolean;
+    reach: number;      // 0..255 (0 = no light)
+    cone: number;       // 0..255 (255 = ~179.3 degrees)
+    red: number;        // 0..255
+    green: number;      // 0..255
+    blue: number;       // 0..255
+    intensity: number; // 0..255 (0 = off, 255 = full)
+  };
 }
 
 export class VoxelParseError extends Error {

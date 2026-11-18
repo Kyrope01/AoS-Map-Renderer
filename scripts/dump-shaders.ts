@@ -17,6 +17,8 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  FLASHLIGHT_BEAM_FRAGMENT,
+  FLASHLIGHT_BEAM_VERTEX,
   GodRaysCompositeShader,
   GodRaysShader,
   StudioPostShader,
@@ -56,6 +58,7 @@ const outputs: { name: string; vertexShader: string; fragmentShader: string }[] 
   { name: 'studio', vertexShader: StudioPostShader.vertexShader, fragmentShader: StudioPostShader.fragmentShader },
   { name: 'godrays', vertexShader: GodRaysShader.vertexShader, fragmentShader: GodRaysShader.fragmentShader },
   { name: 'godrays-composite', vertexShader: GodRaysShader.vertexShader, fragmentShader: GodRaysShader.fragmentShader },
+  { name: 'flashlight-beam', vertexShader: FLASHLIGHT_BEAM_VERTEX, fragmentShader: FLASHLIGHT_BEAM_FRAGMENT },
 ];
 
 for (const entry of outputs) {

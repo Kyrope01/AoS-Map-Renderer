@@ -194,6 +194,16 @@ export interface SharedShaderUniforms {
   uCloudAltitude: { value: number };
   uShowSky: { value: number };
   uIsOrtho: { value: number };
+  // Player flashlight (spotlight from player's head/eyes)
+  uFlashlightEnabled: { value: number };
+  uFlashlightPos: { value: THREE.Vector3 };
+  uFlashlightDir: { value: THREE.Vector3 };
+  uFlashlightColor: { value: THREE.Color };
+  uFlashlightReach: { value: number };
+  uFlashlightConeCos: { value: number };
+  uFlashlightIntensity: { value: number };
+  uFlashlightTime: { value: number };
+  uFlashlightId: { value: number };
 }
 
 // `uSliceAxis` / `uSliceCoord` stay in the shared uniforms because the voxel
@@ -246,6 +256,15 @@ export function createSharedUniforms(): SharedShaderUniforms {
     uCloudAltitude: { value: 0.34 },
     uShowSky: { value: 1.0 },
     uIsOrtho: { value: 0.0 },
+    uFlashlightEnabled: { value: 0 },
+    uFlashlightPos: { value: new THREE.Vector3() },
+    uFlashlightDir: { value: new THREE.Vector3(0, 0, -1) },
+    uFlashlightColor: { value: new THREE.Color('#FFB380') },
+    uFlashlightReach: { value: 60 },
+    uFlashlightConeCos: { value: Math.cos((90 * Math.PI) / 512) },
+    uFlashlightIntensity: { value: 1 },
+    uFlashlightTime: { value: 0 },
+    uFlashlightId: { value: 0 },
   };
 }
 
@@ -551,6 +570,15 @@ export interface OceanUniforms {
   uVolumetricStrength: { value: number };
   uCloudAltitude: { value: number };
   uIsOrtho: { value: number };
+  uFlashlightEnabled: { value: number };
+  uFlashlightPos: { value: THREE.Vector3 };
+  uFlashlightDir: { value: THREE.Vector3 };
+  uFlashlightColor: { value: THREE.Color };
+  uFlashlightReach: { value: number };
+  uFlashlightConeCos: { value: number };
+  uFlashlightIntensity: { value: number };
+  uFlashlightTime: { value: number };
+  uFlashlightId: { value: number };
 }
 
 /**
@@ -585,6 +613,15 @@ export function createOceanMaterial(
     uVolumetricStrength: shared.uVolumetricStrength,
     uCloudAltitude: shared.uCloudAltitude,
     uIsOrtho: shared.uIsOrtho,
+    uFlashlightEnabled: shared.uFlashlightEnabled,
+    uFlashlightPos: shared.uFlashlightPos,
+    uFlashlightDir: shared.uFlashlightDir,
+    uFlashlightColor: shared.uFlashlightColor,
+    uFlashlightReach: shared.uFlashlightReach,
+    uFlashlightConeCos: shared.uFlashlightConeCos,
+    uFlashlightIntensity: shared.uFlashlightIntensity,
+    uFlashlightTime: shared.uFlashlightTime,
+    uFlashlightId: shared.uFlashlightId,
   };
 
   const material = new THREE.ShaderMaterial({
@@ -623,14 +660,14 @@ export function createOceanMaterial(
       uniform float uFogRange;
       uniform float uHeightFog;
       uniform float uVolumetricClouds;
-      uniform float uVolumetricStrength;
-      uniform float uCloudAltitude;
-      uniform float uIsOrtho;
+uniform float uVolumetricStrength;
+  uniform float uCloudAltitude;
+  uniform float uIsOrtho;
 
-      varying vec3 vWorldPos;
-      varying float vDepthDist;
+  varying vec3 vWorldPos;
+  varying float vDepthDist;
 
-      float waveHeight(vec2 p, float t) {
+  float waveHeight(vec2 p, float t) {
         float w1 = sin(p.x * 0.22 + t * 0.9) * cos(p.y * 0.19 - t * 0.7);
         float w2 = sin((p.x + p.y) * 0.45 - t * 1.25) * 0.5;
         float w3 = cos((p.x * 0.85 - p.y * 0.72) + t * 1.6) * 0.25;
@@ -638,6 +675,7 @@ export function createOceanMaterial(
       }
 
       ${FOG_AND_VOLUMETRIC_GLSL}
+      ${PLAYER_FLASHLIGHT_GLSL}
 
       void main() {
         vec2 distToEdge = abs(vWorldPos.xz) - uMapHalfSize;
@@ -669,8 +707,9 @@ export function createOceanMaterial(
 
         vec3 skyBounce = uSkyColor * 0.52 + vec3(0.16);
         vec3 sunlit = uLightColor * (ndl * 0.88 + wrap * 0.14) * uLightIntensity;
-        vec3 waterLit = uWaterColor * (skyBounce + sunlit);
+        vec3 waterLit = uWaterColor * (skyBounce * uLightIntensity + sunlit);
         waterLit += mix(uHorizonColor, uSkyColor, 0.5) * fresnel * 0.16;
+        waterLit += flashlightContribution(vWorldPos, N, uWaterColor);
 
         vec3 skyRefl = mix(uHorizonColor, uZenithColor, clamp(N.y * 0.55, 0.0, 1.0));
         float reflWeight = clamp(fresnel * 0.58 * shoreBlend, 0.0, 0.72);
@@ -793,6 +832,100 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
 `;
 
 /**
+ * Player flashlight spotlight: cone + linear falloff from reach.
+ */
+export const PLAYER_FLASHLIGHT_GLSL = /* glsl */ `
+  uniform int uFlashlightEnabled;
+  uniform vec3 uFlashlightPos;
+  uniform vec3 uFlashlightDir;
+  uniform vec3 uFlashlightColor;
+  uniform float uFlashlightReach;
+  uniform float uFlashlightConeCos;
+  uniform float uFlashlightIntensity;
+  uniform float uFlashlightTime;
+  uniform float uFlashlightId;
+
+  vec3 flashlightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
+    if (uFlashlightEnabled <= 0) return vec3(0.0);
+    vec3 fromLight = worldPos - uFlashlightPos;
+    float dist = length(fromLight);
+    if (dist >= uFlashlightReach) return vec3(0.0);
+    vec3 rayDir = fromLight / max(dist, 0.0001);
+    float cone = dot(rayDir, normalize(uFlashlightDir));
+    float cosOuter = min(uFlashlightConeCos, 0.999);
+    // Main beam: full-range ramp, zero slope at the edge (soft boundary).
+    float beam = smoothstep(cosOuter, 1.0, cone);
+    // Gentle hotspot boost toward the axis; does not touch the outer edge.
+    float cosHot = mix(cosOuter, 1.0, 0.6);
+    beam *= 0.8 + 0.2 * smoothstep(cosHot, 1.0, cone);
+    // Spill: faint halo past the reflector edge so light diffuses instead of
+    // stopping. The min() guarantees edge0 < edge1 even at cone = 255.
+    float halfAngle = acos(cosOuter);
+    float cosSpill = min(cos(min(halfAngle * 1.8, 1.45)), cosOuter - 0.001);
+    float spill = smoothstep(cosSpill, cosOuter, cone) * (1.0 - beam) * 0.12;
+    float coneFactor = beam + spill;
+    if (coneFactor <= 0.0) return vec3(0.0);
+    float diffuse = max(dot(worldNormal, -rayDir), 0.0);
+    if (diffuse <= 0.0) return vec3(0.0);
+    // Zero slope at both ends: gentler near-field, softer far tail than (1-x)^2.
+    float range = 1.0 - smoothstep(0.0, uFlashlightReach, dist);
+    float contrib = coneFactor * diffuse * range;
+    if (contrib < 0.004) return vec3(0.0);
+    return albedo * uFlashlightColor * contrib * uFlashlightIntensity;
+  }
+`;
+
+/**
+ * Visible flashlight beam: a translucent cone shell whose alpha fades toward the
+ * silhouette (view-angle rim fade) and along the beam (bright at the player,
+ * dim at the range end). Both the normal and the view vector live in view space
+ * so the rim fade lands exactly on the geometric silhouette, and `normalMatrix`
+ * keeps the normals correct under the beam's non-uniform (radius, reach, radius)
+ * scale.
+ */
+export const FLASHLIGHT_BEAM_VERTEX = /* glsl */ `
+varying vec3 vBeamViewPos;
+varying vec3 vBeamViewNormal;
+varying float vBeamAxial;
+void main() {
+  // Apex (player end) at +Y, base (range end) at -Y.
+  float t = clamp(position.y + 0.5, 0.0, 1.0);
+  vBeamAxial = pow(t, 2.2);
+  vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+  vBeamViewPos = -mvPosition.xyz;
+  // normalMatrix = inverse-transpose of modelView: correct under the
+  // non-uniform (radius, reach, radius) scale, and in the SAME space as V.
+  vBeamViewNormal = normalize(normalMatrix * normal);
+  gl_Position = projectionMatrix * mvPosition;
+}
+`;
+
+export const FLASHLIGHT_BEAM_FRAGMENT = /* glsl */ `
+uniform vec3 uBeamColor;
+uniform float uBeamOpacity;
+uniform float uBeamRimSoftness;
+varying vec3 vBeamViewPos;
+varying vec3 vBeamViewNormal;
+varying float vBeamAxial;
+void main() {
+  vec3 N = normalize(vBeamViewNormal);
+  if (!gl_FrontFacing) N = -N;
+  vec3 V = normalize(vBeamViewPos);
+  // Both in view space now: facing -> 0 at the true silhouette, so the
+  // shell fades out exactly where the hard geometric edge used to be.
+  float facing = max(dot(N, V), 0.0);
+  float rim = smoothstep(0.0, uBeamRimSoftness, facing);
+  float alpha = vBeamAxial * rim * uBeamOpacity;
+  if (alpha <= 0.003) discard;
+  // Premultiplied-style output: AdditiveBlending (SrcAlpha, One) multiplies
+  // by alpha again, squaring the falloff -- intentional extra feathering.
+  gl_FragColor = vec4(uBeamColor * alpha, alpha);
+  #include <tonemapping_fragment>
+  #include <colorspace_fragment>
+}
+`;
+
+/**
  * Creates the Studio PBR material extended via onBeforeCompile to support
  * Voxel AO, section slicing, optional silhouette outlines, and unified fog.
  */
@@ -838,6 +971,15 @@ export function createPbrVoxelMaterial(
     shader.uniforms.uVolumetricStrength = shared.uVolumetricStrength;
     shader.uniforms.uCloudAltitude = shared.uCloudAltitude;
     shader.uniforms.uIsOrtho = shared.uIsOrtho;
+    shader.uniforms.uFlashlightEnabled = shared.uFlashlightEnabled;
+    shader.uniforms.uFlashlightPos = shared.uFlashlightPos;
+    shader.uniforms.uFlashlightDir = shared.uFlashlightDir;
+    shader.uniforms.uFlashlightColor = shared.uFlashlightColor;
+    shader.uniforms.uFlashlightReach = shared.uFlashlightReach;
+    shader.uniforms.uFlashlightConeCos = shared.uFlashlightConeCos;
+    shader.uniforms.uFlashlightIntensity = shared.uFlashlightIntensity;
+    shader.uniforms.uFlashlightTime = shared.uFlashlightTime;
+    shader.uniforms.uFlashlightId = shared.uFlashlightId;
 
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -893,7 +1035,8 @@ export function createPbrVoxelMaterial(
         varying float vVoxelDepth;
         varying vec3 vCustomViewNormal;
         ${FOG_AND_VOLUMETRIC_GLSL}
-        ${VOXEL_LIGHT_GLSL}`,
+        ${VOXEL_LIGHT_GLSL}
+        ${PLAYER_FLASHLIGHT_GLSL}`,
       )
       // Section slicing runs through `material.clippingPlanes` (see
       // syncSlicePlanes in VoxelViewport): the built-in chunk below is honoured
@@ -917,6 +1060,8 @@ export function createPbrVoxelMaterial(
       .replace(
         '#include <opaque_fragment>',
         `outgoingLight += voxelLightContribution(vVoxelWorldPos,
+          normalize(inverseTransformDirection(normalize(vCustomViewNormal), viewMatrix)), diffuseColor.rgb);
+        outgoingLight += flashlightContribution(vVoxelWorldPos,
           normalize(inverseTransformDirection(normalize(vCustomViewNormal), viewMatrix)), diffuseColor.rgb);
         #include <opaque_fragment>`, // voxel lights -> then fog, see the next replace()
       )
@@ -1010,6 +1155,8 @@ const FRAGMENT_PREAMBLE = /* glsl */ `
 
   ${VOXEL_LIGHT_GLSL}
 
+  ${PLAYER_FLASHLIGHT_GLSL}
+
   vec3 applyFog(vec3 col) {
     return computeSceneFog(col, vWorldPos, max(0.0, vDepthDist), 0.0);
   }
@@ -1056,7 +1203,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.04, 0.05, 0.07), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.82);
         }
 
-        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
+        gl_FragColor = vec4(applyFog(col * uLightIntensity + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor) + flashlightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -1088,7 +1235,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
+        gl_FragColor = vec4(applyFog(col * uLightIntensity + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor) + flashlightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -1124,7 +1271,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.02, 0.03, 0.04), smoothstep(0.66, 0.88, sil) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
+        gl_FragColor = vec4(applyFog(col * uLightIntensity + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor) + flashlightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }
@@ -1145,7 +1292,7 @@ function makeStylizedShader(
         else faceShade = 0.86;
 
         float sun = max(0.0, dot(N, L));
-        float combined = mix(faceShade, 0.52 + sun * 0.68, 0.38) * uLightIntensity * 0.82;
+        float combined = mix(faceShade, 0.52 + sun * 0.68, 0.38) * 0.82;
         vec3 col = vColor * mix(vec3(1.0), uLightColor, 0.55) * combined * ao;
 
         if (uOutlineStrength > 0.001) {
@@ -1155,7 +1302,7 @@ function makeStylizedShader(
           col = mix(col, vec3(0.02, 0.02, 0.03), smoothstep(0.66, 0.88, rim) * uOutlineStrength * 0.8);
         }
 
-        gl_FragColor = vec4(applyFog(col + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
+        gl_FragColor = vec4(applyFog(col * uLightIntensity + voxelLightContribution(vWorldPos, normalize(vWorldNormal), vColor) + flashlightContribution(vWorldPos, normalize(vWorldNormal), vColor)), 1.0);
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }

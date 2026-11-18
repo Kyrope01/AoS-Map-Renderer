@@ -449,6 +449,17 @@ export function generatePlayerId(): string {
 
 export const DEFAULT_ZOMBIE_CLOTH_COLOR = '#1D3521';
 
+/** ZeroSpades default flashlight beam (reach, cone, red, green, blue, intensity). */
+export const DEFAULT_PLAYER_FLASHLIGHT: SpawnedPlayer['flashlight'] = {
+  enabled: false,
+  reach: 60,
+  cone: 90,
+  red: 255,
+  green: 179,
+  blue: 128,
+  intensity: 255,
+};
+
 export function createSpawnedPlayer(
   x: number,
   y: number,
@@ -473,6 +484,15 @@ export function createSpawnedPlayer(
     style: overrides?.style ?? 'classic',
     teamColor: overrides?.teamColor ?? defaultTeamColor,
     blockColor: overrides?.blockColor ?? '#7F5539',
+    flashlight: {
+      enabled: false,
+      reach: 60,
+      cone: 90,
+      red: 255,
+      green: 179,
+      blue: 128,
+      intensity: 255,
+    },
   };
 }
 
@@ -522,6 +542,26 @@ export function applySpawnedPlayerPatch(
     next.weapon = 'spade';
   }
   return next;
+}
+
+/**
+ * Returns a copy of the player's flashlight state with normalized values,
+ * falling back to the ZeroSpades default beam when the player has no personal one.
+ */
+export function createPlayerFlashlightState(
+  overrides?: Partial<SpawnedPlayer['flashlight']>,
+): SpawnedPlayer['flashlight'] {
+  const fallback = { ...DEFAULT_PLAYER_FLASHLIGHT};
+  const next = { ...fallback, ...overrides };
+  return {
+    enabled: next.enabled ?? false,
+    reach: next.reach ?? fallback.reach,
+    cone: next.cone ?? fallback.cone,
+    red: next.red ?? fallback.red,
+    green: next.green ?? fallback.green,
+    blue: next.blue ?? fallback.blue,
+    intensity: next.intensity ?? fallback.intensity,
+  };
 }
 
 /**

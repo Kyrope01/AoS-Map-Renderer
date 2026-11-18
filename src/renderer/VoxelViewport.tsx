@@ -44,6 +44,8 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  FLASHLIGHT_BEAM_FRAGMENT,
+  FLASHLIGHT_BEAM_VERTEX,
   MaterialBank,
   MAX_VOXEL_SHADOW_CASTERS,
   SharedShaderUniforms,
@@ -135,6 +137,11 @@ const _right = new THREE.Vector3();
 const _moveVec = new THREE.Vector3();
 const _offsetVec = new THREE.Vector3();
 const _worldUp = new THREE.Vector3(0, 1, 0);
+const _flashlightPos = new THREE.Vector3();
+const _flashlightDir = new THREE.Vector3();
+const _flashlightEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _beamUp = new THREE.Vector3(0, 1, 0);
+const _beamAxis = new THREE.Vector3();
 
 export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>(
   function VoxelViewport(
@@ -566,6 +573,37 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       voxelMesh.receiveShadow = !isSoftwareGl;
       voxelMesh.visible = false;
       scene.add(voxelMesh);
+
+      // Visible flashlight beam cone (volumetric-style).
+      // Three additive, rim-faded shells (hotspot + main beam + wide spill)
+      // approximate a smooth radial profile so the beam dissolves gradually
+      // instead of ending at a hard geometric line.
+      const flashlightConeGeo = new THREE.ConeGeometry(1, 1, 64, 8, true);
+      const FLASHLIGHT_BEAM_LAYERS = [
+        { angleScale: 0.45, reachScale: 1.0, opacityScale: 1.0, rim: 0.5 },
+        { angleScale: 1.0, reachScale: 1.0, opacityScale: 0.5, rim: 0.65 },
+        { angleScale: 1.65, reachScale: 0.8, opacityScale: 0.16, rim: 0.85 },
+      ] as const;
+      const flashlightBeamLayers = FLASHLIGHT_BEAM_LAYERS.map((layer) => {
+        const mat = new THREE.ShaderMaterial({
+          uniforms: {
+            uBeamColor: { value: new THREE.Color(0xffb380) },
+            uBeamOpacity: { value: 0.25 * layer.opacityScale },
+            uBeamRimSoftness: { value: layer.rim },
+          },
+          vertexShader: FLASHLIGHT_BEAM_VERTEX,
+          fragmentShader: FLASHLIGHT_BEAM_FRAGMENT,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const mesh = new THREE.Mesh(flashlightConeGeo, mat);
+        mesh.frustumCulled = false;
+        mesh.visible = false;
+        scene.add(mesh);
+        return { ...layer, mesh, mat };
+      });
 
       // --- Voxel Lights (Special Effects) -----------------------------------
       // Grid mapping: mesher centers X/Z at 0 and grounds Y at 0, so a voxel
@@ -1266,12 +1304,76 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
 
       const drawFrame = () => {
+        // Sync flashlight uniforms on every draw so slider changes take effect
+        // even when the render loop is idle.
+        const flashlightPlayer = spawnedPlayersRef.current.find((p) => p.flashlight.enabled);
+        if (flashlightPlayer) {
+          const fl = flashlightPlayer.flashlight;
+          _flashlightEuler.set((flashlightPlayer.pitch * Math.PI) / 180, (-flashlightPlayer.yaw * Math.PI) / 180, 0, 'YXZ');
+          _flashlightDir.set(0, 0, -1).applyEuler(_flashlightEuler);
+          _flashlightPos.set(flashlightPlayer.x, flashlightPlayer.y + 1.6, flashlightPlayer.z);
+          _flashlightPos.addScaledVector(_flashlightDir, 0.1);
+          _flashlightPos.y -= 0.05;
+          sharedUniforms.uFlashlightEnabled.value = 1;
+          sharedUniforms.uFlashlightPos.value.copy(_flashlightPos);
+          sharedUniforms.uFlashlightDir.value.copy(_flashlightDir);
+          sharedUniforms.uFlashlightColor.value.setRGB(
+            fl.red / 255,
+            fl.green / 255,
+            fl.blue / 255,
+            THREE.SRGBColorSpace,
+          );
+          sharedUniforms.uFlashlightReach.value = fl.reach;
+          sharedUniforms.uFlashlightConeCos.value = Math.cos((fl.cone * Math.PI) / 512);
+          sharedUniforms.uFlashlightIntensity.value = 6.0 + (fl.intensity / 255) * 1194.0;
+          sharedUniforms.uFlashlightTime.value = elapsedSec;
+          sharedUniforms.uFlashlightId.value = flashlightPlayer.id.charCodeAt(0) + flashlightPlayer.id.charCodeAt(1) * 31 + flashlightPlayer.id.charCodeAt(2) * 961;
+
+          // Visible beam cone
+          const halfAngle = Math.acos(
+            THREE.MathUtils.clamp(sharedUniforms.uFlashlightConeCos.value, -1, 1),
+          );
+          const baseOpacity = 0.08 + (fl.intensity / 255) * 0.22;
+          _beamAxis.copy(_flashlightDir).negate();
+          for (const layer of flashlightBeamLayers) {
+            // Cap prevents tan() blowup: cone = 255 is already ~89.6 deg half-angle.
+            const layerHalf = Math.min(halfAngle * layer.angleScale, Math.PI * 0.46);
+            const layerReach = fl.reach * layer.reachScale;
+            const radius = layerReach * Math.tan(layerHalf);
+            layer.mesh.visible = true;
+            layer.mesh.position.copy(_flashlightPos).addScaledVector(_flashlightDir, layerReach * 0.5);
+            layer.mesh.quaternion.setFromUnitVectors(_beamUp, _beamAxis);
+            layer.mesh.scale.set(radius, layerReach, radius);
+            layer.mat.uniforms.uBeamColor.value.setRGB(
+              fl.red / 255,
+              fl.green / 255,
+              fl.blue / 255,
+              THREE.SRGBColorSpace,
+            );
+            layer.mat.uniforms.uBeamOpacity.value = baseOpacity * layer.opacityScale;
+          }
+        } else {
+          sharedUniforms.uFlashlightEnabled.value = 0;
+          for (const layer of flashlightBeamLayers) layer.mesh.visible = false;
+        }
+
         skyMesh.position.copy(activeCamera.position);
         controls.autoRotateSpeed = settingsRef.current.autoRotateSpeed;
         syncGodRaysPass();
 
-        if (composer && !isSoftwareGl) composer.render();
-        else renderer.render(scene, activeCamera);
+        // Render with fallback: if composer fails (e.g. shader error in a pass),
+        // fall back to direct renderer so the map remains visible.
+        try {
+          if (composer && !isSoftwareGl) composer.render();
+          else renderer.render(scene, activeCamera);
+        } catch (err) {
+          console.error('[VoxelViewport] Render error, falling back to direct renderer:', err);
+          try {
+            renderer.render(scene, activeCamera);
+          } catch (fallbackErr) {
+            console.error('[VoxelViewport] Fallback render also failed:', fallbackErr);
+          }
+        }
         if (!isExporting) {
           onFrameRenderedRef.current?.();
         }
@@ -1411,18 +1513,26 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         }
       };
 
+      // Player flashlight toggle state only; full sync moved to drawFrame
+      // so it updates on every render path (continuous loop + one-off renders).
+
       function tick() {
-        const now = performance.now();
-        const dt = Math.min(0.1, (now - lastTime) / 1000);
-        lastTime = now;
+        try {
+          const now = performance.now();
+          const dt = Math.min(0.1, (now - lastTime) / 1000);
+          lastTime = now;
 
-        advanceFrame(dt);
-        drawFrame();
+          advanceFrame(dt);
+          drawFrame();
 
-        if (needsContinuousLoop()) {
-          if (isSoftwareGl) afterDraw(tick);
-          else frameId = requestAnimationFrame(tick);
-        } else {
+          if (needsContinuousLoop()) {
+            if (isSoftwareGl) afterDraw(tick);
+            else frameId = requestAnimationFrame(tick);
+          } else {
+            isLoopRunning = false;
+          }
+        } catch (err) {
+          console.error('[VoxelViewport] Tick error, stopping loop:', err);
           isLoopRunning = false;
         }
       }
@@ -1439,26 +1549,25 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         }
         renderBusy = true;
         frameId = requestAnimationFrame(() => {
-          if (isExporting) {
-            renderBusy = false;
-            renderDirty = true;
-            return;
-          }
-          renderDirty = false;
-          const now = performance.now();
-          const dt = Math.min(0.05, (now - lastTime) / 1000);
-          lastTime = now;
-          if (settingsRef.current.cameraMode === 'orbit') {
-            controls.update();
-          }
-          sharedUniforms.uTime.value = elapsedSec + dt;
-          drawFrame();
-          const done = () => {
+          try {
+            if (isExporting) {
+              renderBusy = false;
+              renderDirty = true;
+              return;
+            }
+            renderDirty = false;
+            const now = performance.now();
+            const dt = Math.min(0.05, (now - lastTime) / 1000);
+            lastTime = now;
+            if (settingsRef.current.cameraMode === 'orbit') {
+              controls.update();
+            }
+            sharedUniforms.uTime.value = elapsedSec + dt;
+            drawFrame();
+          } finally {
             renderBusy = false;
             if (renderDirty) requestRender();
-          };
-          if (isSoftwareGl) afterDraw(done);
-          else done();
+          }
         });
       }
 
@@ -2048,21 +2157,18 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         startOrPokeLoop();
       };
 
-      const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
-        if (!meshData) {
-          voxelMesh.visible = false;
-          hoverBox.visible = false;
-          renderer.shadowMap.needsUpdate = true;
-          syncSettings();
-          return;
-        }
-        voxelMesh.visible = true;
-        const oldGeo = voxelMesh.geometry;
-        voxelMesh.geometry = meshData.geometry;
-        // On HMR/remount the init effect and the `[builtMesh]` effect both call
-        // syncMesh with the same mesh; disposing it would free the live geometry
-        // and force a wasteful re-upload.
-        if (oldGeo !== meshData.geometry) oldGeo.dispose();
+const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
+  if (!meshData) {
+    voxelMesh.visible = false;
+    hoverBox.visible = false;
+    renderer.shadowMap.needsUpdate = true;
+    syncSettings();
+    return;
+  }
+  voxelMesh.visible = true;
+  const oldGeo = voxelMesh.geometry;
+  voxelMesh.geometry = meshData.geometry;
+  if (oldGeo !== meshData.geometry) oldGeo.dispose();
 
         gridSize.copy(meshData.size);
         gridOffset.set(meshData.size.x * 0.5, 0, meshData.size.z * 0.5);
@@ -2555,6 +2661,8 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         sharedUniforms.uVoxelShadowTexture.value.dispose();
         hoverBox.geometry.dispose();
         (hoverBox.material as THREE.Material).dispose();
+        flashlightConeGeo.dispose();
+        for (const layer of flashlightBeamLayers) layer.mat.dispose();
         materials.dispose();
         skyGeo.dispose();
         skyMat.dispose();

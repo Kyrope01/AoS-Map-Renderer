@@ -6,8 +6,11 @@ import {
   createOceanMaterial,
   createSharedUniforms,
   createSkyDomeMaterial,
+  FLASHLIGHT_BEAM_FRAGMENT,
+  FLASHLIGHT_BEAM_VERTEX,
   GodRaysCompositeShader,
   GodRaysShader,
+  PLAYER_FLASHLIGHT_GLSL,
   StudioPostShader,
 } from './shaders';
 import { sortVoxelLightsByIntensity } from './voxelLightTexture';
@@ -133,5 +136,15 @@ test('volumetric GodRaysShader marches 3D shadow map with IGN jitter and omnidir
   assert.doesNotMatch(GodRaysShader.fragmentShader, /uLightPos/); // No 2D screen-space radial smear
   assert.match(GodRaysCompositeShader.fragmentShader, /uniform sampler2D tRays;/);
   assert.match(GodRaysCompositeShader.fragmentShader, /depthSigma/);
+});
+
+test('flashlight beam rim fade uses one space and scale-correct normals', () => {
+  assert.match(FLASHLIGHT_BEAM_VERTEX, /normalMatrix \* normal/);
+  assert.doesNotMatch(FLASHLIGHT_BEAM_VERTEX, /vBeamWorldNormal/);
+  assert.match(FLASHLIGHT_BEAM_FRAGMENT, /dot\(N, V\)/);
+});
+
+test('flashlight spill band keeps smoothstep edges ordered at max cone', () => {
+  assert.match(PLAYER_FLASHLIGHT_GLSL, /cosOuter - 0\.001/);
 });
 

@@ -1,4 +1,4 @@
-import { Copy, Crosshair, Move, Skull, Trash2, User, X } from 'lucide-react';
+import { Copy, Crosshair, Flashlight, Move, Skull, Trash2, User, X } from 'lucide-react';
 import { RefObject } from 'react';
 import {
   DEFAULT_ZOMBIE_CLOTH_COLOR,
@@ -371,6 +371,116 @@ export function PlayerModelPanel({
           </div>
         </div>
       )}
+
+      {/* Flashlight Controls (shown for all players) */}
+      <div className="space-y-2 pt-1 border-t border-white/8">
+        <span className="block text-[10px] font-semibold uppercase tracking-wider text-[#8F98A6]">
+          Flashlight
+        </span>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-medium text-[#B8C0CC]">Enabled</span>
+          <button
+            type="button"
+            onClick={() => onUpdate(player.id, { flashlight: { ...player.flashlight, enabled: !player.flashlight.enabled } })}
+            className={`px-2.5 py-0.5 rounded border text-[10px] font-semibold whitespace-nowrap transition-colors cursor-pointer ${
+              player.flashlight.enabled ? activeBtn : inactiveBtn
+            }`}
+          >
+            {player.flashlight.enabled ? 'On' : 'Off'}
+          </button>
+        </div>
+
+        {player.flashlight.enabled && (
+          <>
+            <PanelSlider
+              id="player-flashlight-reach-slider"
+              label="Reach"
+              value={player.flashlight.reach}
+              min={0}
+              max={255}
+              step={1}
+              displayValue={`${player.flashlight.reach}`}
+              onChange={(v) => onUpdate(player.id, {
+                flashlight: { ...player.flashlight, reach: v }
+              })}
+            />
+            <PanelSlider
+              id="player-flashlight-cone-slider"
+              label="Cone"
+              value={player.flashlight.cone}
+              min={0}
+              max={255}
+              step={1}
+              displayValue={`${player.flashlight.cone}`}
+              onChange={(v) => onUpdate(player.id, {
+                flashlight: { ...player.flashlight, cone: v }
+              })}
+            />
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-medium text-[#B8C0CC]">Color</span>
+              <div className="flex items-center gap-1.5">
+                {PLAYER_TEAM_SWATCHES.map((sw) => (
+                  <button
+                    key={sw.hex}
+                    type="button"
+                    title={sw.label}
+                    aria-label={`Flashlight color ${sw.label}`}
+                    onClick={() => onUpdate(player.id, {
+                      flashlight: {
+                        ...player.flashlight,
+                        red: parseInt(sw.hex.slice(1, 3), 16),
+                        green: parseInt(sw.hex.slice(3, 5), 16),
+                        blue: parseInt(sw.hex.slice(5, 7), 16),
+                      }
+                    })}
+                    className={`w-4 h-4 rounded-sm border transition-transform cursor-pointer ${
+                      player.flashlight.red === parseInt(sw.hex.slice(1, 3), 16) &&
+                      player.flashlight.green === parseInt(sw.hex.slice(3, 5), 16) &&
+                      player.flashlight.blue === parseInt(sw.hex.slice(5, 7), 16)
+                        ? 'ring-2 ring-[#E05A2B] border-white scale-110'
+                        : 'border-white/20 hover:scale-105'
+                    }`}
+                    style={{ backgroundColor: sw.hex }}
+                  />
+                ))}
+                <input
+                  type="color"
+                  value={`#${player.flashlight.red.toString(16).padStart(2, '0')}${player.flashlight.green.toString(16).padStart(2, '0')}${player.flashlight.blue.toString(16).padStart(2, '0')}`}
+                  onChange={(e) => {
+                    const hex = e.target.value;
+                    const r = parseInt(hex.slice(1, 3), 16);
+                    const g = parseInt(hex.slice(3, 5), 16);
+                    const b = parseInt(hex.slice(5, 7), 16);
+                    onUpdate(player.id, {
+                      flashlight: {
+                        ...player.flashlight,
+                        red: r,
+                        green: g,
+                        blue: b,
+                      }
+                    });
+                  }}
+                  className="w-5 h-5 p-0 border-0 rounded bg-transparent cursor-pointer"
+                  title="Custom flashlight color"
+                  aria-label="Custom flashlight color"
+                />
+              </div>
+            </div>
+            <PanelSlider
+              id="player-flashlight-intensity-slider"
+              label="Intensity"
+              value={player.flashlight.intensity}
+              min={0}
+              max={255}
+              step={1}
+              displayValue={`${player.flashlight.intensity}`}
+              onChange={(v) => onUpdate(player.id, {
+                flashlight: { ...player.flashlight, intensity: v }
+              })}
+            />
+          </>
+        )}
+      </div>
 
       {/* Rotation & Pitch */}
       <div className="space-y-2 pt-1 border-t border-white/8">
