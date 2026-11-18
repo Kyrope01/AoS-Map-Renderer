@@ -575,13 +575,10 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       scene.add(voxelMesh);
 
       // Visible flashlight beam cone (volumetric-style).
-      // Two concentric additive, rim-faded shells strictly within halfAngle
-      // (hotspot + main beam) so the visible beam matches the spotlight cone
-      // without drawing an extra cone outside the main cone.
+      // Single additive, rim-faded shell matching the spotlight's halfAngle.
       const flashlightConeGeo = new THREE.ConeGeometry(1, 1, 64, 8, true);
       const FLASHLIGHT_BEAM_LAYERS = [
-        { angleScale: 0.5, reachScale: 1.0, opacityScale: 0.85, rim: 0.65 },
-        { angleScale: 1.0, reachScale: 1.0, opacityScale: 0.5, rim: 0.8 },
+        { angleScale: 1.0, reachScale: 1.0, opacityScale: 1.0, rim: 0.65 },
       ] as const;
       const flashlightBeamLayers = FLASHLIGHT_BEAM_LAYERS.map((layer) => {
         const mat = new THREE.ShaderMaterial({
