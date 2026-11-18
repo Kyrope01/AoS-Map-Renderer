@@ -457,6 +457,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
     float c4 = c2 * c2;
 
     // 2. Active Distance Fog (In-Game AoS linear cutoff OR Atmospheric Exp2)
+    float sunScatter = clamp(uLightIntensity, 0.0, 1.5);
     if (uFogMode == 1) {
       float fogStart = camOffset + uFogRange * 0.24;
       float fogEnd = max(fogStart + 20.0, camOffset + uFogRange * 1.55);
@@ -464,7 +465,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
       float distRamp = smoothstep(camOffset + uModelRadius * 0.15, fogEnd, depthDist);
       float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * 0.65 * distRamp;
       float f = clamp(max(max(linFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * 0.12, c4 * 0.45);
+      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * sunScatter), c4 * 0.45);
       return mix(col, inGameTint, f);
     }
 
@@ -473,7 +474,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
     float distRamp = smoothstep(uModelRadius * 0.35, uModelRadius * 3.0, max(0.0, depthDist));
     float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * distRamp;
     float fogFactor = clamp(max(max(distFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * 0.10, c4 * cPos * 0.35);
+    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * (0.10 * sunScatter), c4 * cPos * 0.35);
     return mix(col, mieFog, fogFactor);
   }
 `;
@@ -487,8 +488,11 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
       uZenithColor: shared.uZenithColor,
       uHorizonColor: shared.uHorizonColor,
       uFogColor: shared.uFogColor,
+      uFogRange: shared.uFogRange,
+      uFogStrength: shared.uFogStrength,
       uLightDir: shared.uLightDir,
       uLightColor: shared.uLightColor,
+      uLightIntensity: shared.uLightIntensity,
       uShowSky: shared.uShowSky,
       uVolumetricClouds: shared.uVolumetricClouds,
       uVolumetricStrength: shared.uVolumetricStrength,
@@ -508,8 +512,11 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
       uniform vec3 uZenithColor;
       uniform vec3 uHorizonColor;
       uniform vec3 uFogColor;
+      uniform float uFogRange;
+      uniform float uFogStrength;
       uniform vec3 uLightDir;
       uniform vec3 uLightColor;
+      uniform float uLightIntensity;
       uniform float uShowSky;
       uniform float uVolumetricClouds;
       uniform float uVolumetricStrength;
@@ -537,6 +544,17 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
           float aboveHorizon = smoothstep(-0.06, 0.08, dir.y);
           sky += uLightColor * (halo + coreHalo + disc) * aboveHorizon;
         }
+
+        // Apply scene distance fog across the lower sky so distant fogged voxels,
+        // ocean, and sky share the exact same fog veil instead of cutting out.
+        float fogReachScale = clamp(320.0 / max(uFogRange, 40.0), 0.35, 3.0);
+        float fogHeightCeiling = mix(0.06, 0.42, clamp(fogReachScale / 3.0, 0.0, 1.0)) * clamp(uFogStrength, 0.0, 2.0);
+        float skyFog = (1.0 - smoothstep(0.0, max(0.04, fogHeightCeiling), max(dir.y, 0.0))) * clamp(uFogStrength, 0.0, 1.0);
+        float cPos = max(dot(dir, sunDir), 0.0);
+        float c2 = cPos * cPos;
+        float c4 = c2 * c2;
+        vec3 fogTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * clamp(uLightIntensity, 0.0, 1.5)), c4 * 0.45);
+        sky = mix(sky, fogTint, skyFog);
 
         gl_FragColor = vec4(sky, 1.0);
         #include <tonemapping_fragment>
