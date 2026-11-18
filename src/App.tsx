@@ -464,6 +464,36 @@ export default function App() {
     [],
   );
 
+  const lightPanelSizeRef = useRef<{ w: number; h: number } | null>(null);
+  const playerPanelSizeRef = useRef<{ w: number; h: number } | null>(null);
+
+  const measureFloatingPanels = useCallback(() => {
+    const lightEl = lightPanelRef.current;
+    if (lightEl) {
+      lightPanelSizeRef.current = {
+        w: lightEl.offsetWidth || VOXEL_LIGHT_PANEL_W,
+        h: lightEl.offsetHeight || VOXEL_LIGHT_PANEL_H,
+      };
+    } else {
+      lightPanelSizeRef.current = null;
+    }
+
+    const playerEl = playerPanelRef.current;
+    if (playerEl) {
+      const p = selectedPlayerRef.current;
+      const fallbackH =
+        p && p.characterType !== 'zombie' && p.stance !== 'corpse' && p.weapon === 'block'
+          ? 500
+          : 454;
+      playerPanelSizeRef.current = {
+        w: playerEl.offsetWidth || PLAYER_PANEL_W,
+        h: playerEl.offsetHeight || fallbackH,
+      };
+    } else {
+      playerPanelSizeRef.current = null;
+    }
+  }, []);
+
   // Directly update floating panel & dot transforms on the DOM inside every WebGL
   // frame callback so orbiting, panning, and Free Cam flight track at full 60/120Hz
   // without React re-render stepping or 50ms polling lag.
@@ -488,8 +518,8 @@ export default function App() {
       if (lightPanelEl) {
         lightPanelEl.style.visibility = pos.visible ? 'visible' : 'hidden';
         if (pos.visible) {
-          const panelW = lightPanelEl.offsetWidth || VOXEL_LIGHT_PANEL_W;
-          const panelH = lightPanelEl.offsetHeight || VOXEL_LIGHT_PANEL_H;
+          const panelW = lightPanelSizeRef.current?.w ?? VOXEL_LIGHT_PANEL_W;
+          const panelH = lightPanelSizeRef.current?.h ?? VOXEL_LIGHT_PANEL_H;
           const { left, top } = computeFloatingPanelCoords(
             pos.x,
             pos.y,
@@ -518,14 +548,14 @@ export default function App() {
       const pos = vp.projectWorldToScreen(player.x, anchorY, player.z);
       playerPanelEl.style.visibility = pos.visible ? 'visible' : 'hidden';
       if (pos.visible) {
-        const panelW = playerPanelEl.offsetWidth || PLAYER_PANEL_W;
-        const panelH =
-          playerPanelEl.offsetHeight ||
-          (player.characterType !== 'zombie' &&
+        const fallbackH =
+          player.characterType !== 'zombie' &&
           player.stance !== 'corpse' &&
           player.weapon === 'block'
             ? 500
-            : 454);
+            : 454;
+        const panelW = playerPanelSizeRef.current?.w ?? PLAYER_PANEL_W;
+        const panelH = playerPanelSizeRef.current?.h ?? fallbackH;
         const { left, top } = computeFloatingPanelCoords(
           pos.x,
           pos.y,
@@ -542,6 +572,7 @@ export default function App() {
   }, []);
 
   useLayoutEffect(() => {
+    measureFloatingPanels();
     syncFloatingAnchors();
   }, [
     selectedLightId,
@@ -555,14 +586,20 @@ export default function App() {
     selectedPlayer?.characterType,
     selectedPlayer?.stance,
     selectedPlayer?.weapon,
+    selectedPlayer?.flashlight.enabled,
     sidebarCollapsed,
+    measureFloatingPanels,
     syncFloatingAnchors,
   ]);
 
   useEffect(() => {
-    window.addEventListener('resize', syncFloatingAnchors);
-    return () => window.removeEventListener('resize', syncFloatingAnchors);
-  }, [syncFloatingAnchors]);
+    const onResize = () => {
+      measureFloatingPanels();
+      syncFloatingAnchors();
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [measureFloatingPanels, syncFloatingAnchors]);
 
   return (
     <main

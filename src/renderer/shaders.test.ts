@@ -98,8 +98,8 @@ test('voxel light shaders bind uShadowCasterCount, cull dim lights, and split sh
     assert.match(frag, /uniform int uShadowCasterCount;/);
     assert.match(frag, /uniform float uIsOrtho;/);
     assert.match(frag, /contrib < 0\.004/);
-    assert.match(frag, /for \(int i = 0; i < 16; i\+\+\)/);
-    assert.match(frag, /for \(int i = 16; i < 512; i\+\+\)/);
+    assert.match(frag, /for \(int i = 0; i < 4; i\+\+\)/);
+    assert.match(frag, /for \(int i = 4; i < 512; i\+\+\)/);
     assert.match(frag, /voxelShadowVisibility\(/);
     assert.match(frag, /floor\(\(packed \+ 0\.01\) \/ exp2\(mod\(cell\.x, 8\.0\)\)\)/);
     assert.match(frag, /max\(0\.0\d*, mix\(1\.0,/);

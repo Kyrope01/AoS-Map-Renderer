@@ -156,7 +156,7 @@ export const SHADER_PRESETS: ShaderPresetMeta[] = [
   { id: 'voxlap', category: 'cinematic', label: 'Voxlap 2011', description: 'Classic AoS face shading' },
 ];
 
-export const MAX_VOXEL_SHADOW_CASTERS = 16;
+export const MAX_VOXEL_SHADOW_CASTERS = 4;
 
 export interface SharedShaderUniforms {
   uTime: { value: number };
@@ -766,22 +766,32 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
   uniform vec3 uVoxelGridOffset;
   uniform int uVoxelShadowsEnabled;
 
-  bool voxelShadowSolid(vec3 cell, vec3 worldEntry, vec3 worldExit) {
+  bool voxelShadowSolid(
+    vec3 cell,
+    vec3 worldEntry,
+    vec3 worldExit,
+    inout float cachedIndex,
+    inout float cachedPacked
+  ) {
     if (any(lessThan(cell, vec3(0.0))) || any(greaterThanEqual(cell, uVoxelGridSize))) return false;
     // Ignore removed portions when the section-slice control is active.
     if (uSliceAxis == 1 && min(worldEntry.x, worldExit.x) > uSliceCoord) return false;
     if (uSliceAxis == 2 && min(worldEntry.y, worldExit.y) > uSliceCoord) return false;
     if (uSliceAxis == 3 && min(worldEntry.z, worldExit.z) > uSliceCoord) return false;
     float index = (cell.y * uVoxelGridSize.z + cell.z) * uVoxelShadowAtlas.z + floor(cell.x / 8.0);
-    float rowY = floor((index + 0.1) / uVoxelShadowAtlas.x);
-    float colX = floor(index - rowY * uVoxelShadowAtlas.x + 0.1);
-    vec2 uv = (vec2(colX, rowY) + 0.5) / uVoxelShadowAtlas.xy;
-    float packed = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
+    if (index != cachedIndex) {
+      cachedIndex = index;
+      float rowY = floor((index + 0.1) / uVoxelShadowAtlas.x);
+      float colX = floor(index - rowY * uVoxelShadowAtlas.x + 0.1);
+      vec2 uv = (vec2(colX, rowY) + 0.5) / uVoxelShadowAtlas.xy;
+      cachedPacked = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
+    }
+    float packed = cachedPacked;
     return mod(floor((packed + 0.01) / exp2(mod(cell.x, 8.0))), 2.0) >= 1.0;
   }
 
-  // Exact voxel-grid traversal. Light range is at most 120 voxels, so 384
-  // cell crossings cover even a diagonal ray at the maximum range.
+  // Exact voxel-grid traversal bounded by the ray length so short-range rays
+  // exit early while maximum-range diagonal rays still stay covered.
   float voxelShadowVisibility(vec3 worldPos, vec3 worldNormal, vec3 lightPos) {
     if (uVoxelShadowsEnabled == 0) return 1.0;
     vec3 origin = worldPos + worldNormal * 0.025;
@@ -795,12 +805,15 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     vec3 delta = 1.0 / max(abs(dir), vec3(0.000001));
     vec3 side = (stepDir * (cell - pos) + stepDir * 0.5 + 0.5) * delta;
     float travel = 0.0;
+    int maxSteps = int(min(384.0, rayLength * 1.75 + 8.0));
+    float cachedIndex = -1.0;
+    float cachedPacked = 0.0;
     for (int stepIndex = 0; stepIndex < 384; stepIndex++) {
-      if (travel >= rayLength - 0.001) break;
+      if (stepIndex >= maxSteps || travel >= rayLength - 0.001) break;
       vec3 entry = origin + dir * (travel + 0.0001);
       float exitDistance = min(rayLength, min(side.x, min(side.y, side.z)));
       vec3 exitPoint = origin + dir * exitDistance;
-      if (voxelShadowSolid(cell, entry, exitPoint)) return 0.0;
+      if (voxelShadowSolid(cell, entry, exitPoint, cachedIndex, cachedPacked)) return 0.0;
       if (side.x <= side.y && side.x <= side.z) {
         travel = side.x; side.x += delta.x; cell.x += stepDir.x;
       } else if (side.y <= side.z) {
@@ -812,7 +825,15 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     return 1.0;
   }
 
-  vec3 evalVoxelLight(int idx, vec3 worldPos, vec3 worldNormal, vec3 albedo, out vec3 lightPosOut) {
+  vec3 evalVoxelLight(
+    int idx,
+    vec3 worldPos,
+    vec3 worldNormal,
+    vec3 albedo,
+    out vec3 lightPosOut,
+    out float contribOut
+  ) {
+    contribOut = 0.0;
     float row = (float(idx) + 0.5) / float(${MAX_VOXEL_LIGHTS});
     vec4 positionRange = texture2D(uVoxelLightTexture, vec2(0.25, row));
     lightPosOut = positionRange.xyz;
@@ -829,25 +850,28 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     if (diffuse <= 0.0 || colorIntensity.a <= 0.0) return vec3(0.0);
     float contrib = diffuse * falloff * colorIntensity.a / (1.0 + distanceSquared * 0.06);
     if (contrib < 0.004) return vec3(0.0);
+    contribOut = contrib;
     return albedo * colorIntensity.rgb * contrib;
   }
 
-  // Separate shadow-casting (0..16) and unshadowed (16..512) loops keep the GPU
+  // Separate shadow-casting (0..4) and unshadowed (4..512) loops keep the GPU
   // shader compiler from hoisting the 384-step DDA register state across all 512 slots.
   vec3 voxelLightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
     vec3 result = vec3(0.0);
     vec3 lightPos;
+    float contrib;
     int shadowCount = min(uVoxelLightCount, uShadowCasterCount);
     for (int i = 0; i < ${MAX_VOXEL_SHADOW_CASTERS}; i++) {
       if (i >= shadowCount) break;
-      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos, contrib);
       if (dot(lit, lit) > 0.0) {
-        result += lit * voxelShadowVisibility(worldPos, worldNormal, lightPos);
+        float vis = contrib > 0.02 ? voxelShadowVisibility(worldPos, worldNormal, lightPos) : 1.0;
+        result += lit * vis;
       }
     }
     for (int i = ${MAX_VOXEL_SHADOW_CASTERS}; i < ${MAX_VOXEL_LIGHTS}; i++) {
       if (i >= uVoxelLightCount) break;
-      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos, contrib);
       result += lit;
     }
     return result;
