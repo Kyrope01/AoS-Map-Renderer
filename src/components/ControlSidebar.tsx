@@ -1098,7 +1098,7 @@ export function ControlSidebar({
                 id="light-el"
                 label="Elevation"
                 value={settings.lightElevation}
-                min={0}
+                min={-10}
                 max={85}
                 step={1}
                 displayValue={`${settings.lightElevation}°`}
