@@ -53,7 +53,23 @@ import {
   syncSharedUniforms,
 } from './shaders';
 import { computeSlicePlane, isInsideSlice as pointInsideSlice } from './slice';
+import { raycastVoxelGrid } from './gridRaycast';
 import { VolumetricGodRaysPass } from './volumetricGodRaysPass';
+
+export interface VoxPerfStats {
+  shadowRebuilds: number;
+  raycastMs: number;
+  frameMs: number;
+  gpuMs: number | null;
+  calls: number;
+  triangles: number;
+}
+
+declare global {
+  interface Window {
+    __voxPerf?: VoxPerfStats;
+  }
+}
 
 export interface VoxelViewportHandle {
   applyCameraPreset: (preset: CameraPreset) => void;
@@ -282,19 +298,25 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const container = mountRef.current;
       if (!container) return;
 
-      const isSoftwareGl = (() => {
-        try {
-          const probe = document.createElement('canvas').getContext('webgl2');
-          if (!probe) return true;
-          const ext = probe.getExtension('WEBGL_debug_renderer_info');
-          const param = ext ? ext.UNMASKED_RENDERER_WEBGL : probe.RENDERER;
-          const gpu = String(probe.getParameter(param));
-          probe.getExtension('WEBGL_lose_context')?.loseContext();
-          return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
-        } catch {
-          return true;
-        }
-      })();
+      const urlParams = new URLSearchParams(window.location.search);
+      const perfEnabled = urlParams.has('perf');
+      const forceSoftGl = urlParams.has('softgl');
+
+      const isSoftwareGl =
+        forceSoftGl ||
+        (() => {
+          try {
+            const probe = document.createElement('canvas').getContext('webgl2');
+            if (!probe) return true;
+            const ext = probe.getExtension('WEBGL_debug_renderer_info');
+            const param = ext ? ext.UNMASKED_RENDERER_WEBGL : probe.RENDERER;
+            const gpu = String(probe.getParameter(param));
+            probe.getExtension('WEBGL_lose_context')?.loseContext();
+            return /SwiftShader|llvmpipe|softpipe|Software|Basic Render/i.test(gpu);
+          } catch {
+            return true;
+          }
+        })();
 
       const width = container.clientWidth || window.innerWidth;
       const height = container.clientHeight || window.innerHeight;
@@ -311,11 +333,50 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       renderer.shadowMap.enabled = !isSoftwareGl;
       renderer.shadowMap.type = THREE.PCFShadowMap;
       renderer.shadowMap.autoUpdate = false;
-      renderer.shadowMap.needsUpdate = true;
+      renderer.shadowMap.needsUpdate = !isSoftwareGl;
       renderer.domElement.style.display = 'block';
       renderer.domElement.style.width = '100%';
       renderer.domElement.style.height = '100%';
       container.appendChild(renderer.domElement);
+
+      let shadowDirty = false;
+      let lastShadowRebuild = 0;
+      const requestShadowRebuild = (immediate = false) => {
+        if (isSoftwareGl) return;
+        if (immediate) {
+          renderer.shadowMap.needsUpdate = true;
+          shadowDirty = false;
+          lastShadowRebuild = performance.now();
+        } else {
+          shadowDirty = true;
+        }
+      };
+
+      // Optional `?perf` HUD counters + EXT_disjoint_timer_query_webgl2 GPU timer.
+      const glCtx = renderer.getContext() as WebGL2RenderingContext;
+      const timerQueryExt = perfEnabled
+        ? (glCtx.getExtension('EXT_disjoint_timer_query_webgl2') as {
+            TIME_ELAPSED_EXT: number;
+            GPU_DISJOINT_EXT: number;
+          } | null)
+        : null;
+      let pendingGpuQuery: WebGLQuery | null = null;
+      let lastPerfLog = performance.now();
+      let perfFrameAccum = 0;
+      let perfFrameSamples = 0;
+      let perfGpuAccum = 0;
+      let perfGpuSamples = 0;
+      const perfStats: VoxPerfStats = {
+        shadowRebuilds: 0,
+        raycastMs: 0,
+        frameMs: 0,
+        gpuMs: null,
+        calls: 0,
+        triangles: 0,
+      };
+      if (perfEnabled) {
+        window.__voxPerf = perfStats;
+      }
 
       const handleContextLost = (e: Event) => {
         e.preventDefault();
@@ -326,7 +387,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         // GPU resources are gone until three re-uploads them; the shadow atlas and
         // the visible frame both have to be rebuilt, and the canvas stays black
         // until something asks for a draw.
-        renderer.shadowMap.needsUpdate = true;
+        requestShadowRebuild(true);
         requestRender();
       };
       renderer.domElement.addEventListener('webglcontextlost', handleContextLost);
@@ -446,7 +507,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         emptyTexture.needsUpdate = true;
         sharedUniforms.uVoxelShadowTexture.value = emptyTexture;
         sharedUniforms.uVoxelShadowsEnabled.value = 0;
-        if (grid) {
+        if (grid && !isSoftwareGl) {
           try {
             const pre = precomputedShadowRef.current;
             if (pre) {
@@ -575,19 +636,15 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       scene.add(voxelMesh);
 
       // Visible flashlight beam cone (volumetric-style).
-      // Three additive, rim-faded shells (hotspot + main beam + wide spill)
-      // approximate a smooth radial profile so the beam dissolves gradually
-      // instead of ending at a hard geometric line.
+      // Single additive, rim-faded shell matching the spotlight's halfAngle.
       const flashlightConeGeo = new THREE.ConeGeometry(1, 1, 64, 8, true);
       const FLASHLIGHT_BEAM_LAYERS = [
-        { angleScale: 0.45, reachScale: 1.0, opacityScale: 1.0, rim: 0.5 },
-        { angleScale: 1.0, reachScale: 1.0, opacityScale: 0.5, rim: 0.65 },
-        { angleScale: 1.65, reachScale: 0.8, opacityScale: 0.16, rim: 0.85 },
+        { angleScale: 1.0, reachScale: 1.0, opacityScale: 1.0, rim: 0.65 },
       ] as const;
       const flashlightBeamLayers = FLASHLIGHT_BEAM_LAYERS.map((layer) => {
         const mat = new THREE.ShaderMaterial({
           uniforms: {
-            uBeamColor: { value: new THREE.Color(0xffb380) },
+            uBeamColor: { value: new THREE.Color(0xfffcfa) },
             uBeamOpacity: { value: 0.25 * layer.opacityScale },
             uBeamRimSoftness: { value: layer.rim },
           },
@@ -778,6 +835,17 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         rec.armsPivot.visible = !isCorpse;
       };
 
+      const setPlayerCastShadow = (rec: RenderedPlayerRecord, cast: boolean) => {
+        const enabled = cast && !isSoftwareGl;
+        rec.legLeftMesh.castShadow = enabled;
+        rec.legRightMesh.castShadow = enabled;
+        rec.torsoMesh.castShadow = enabled;
+        rec.headMesh.castShadow = enabled;
+        rec.armsMesh.castShadow = enabled;
+        rec.toolMesh.castShadow = enabled;
+        rec.corpseMesh.castShadow = enabled;
+      };
+
       const syncPlayers = () => {
         const players = spawnedPlayersRef.current;
         const activeMat = materials[settingsRef.current.shaderMode];
@@ -791,7 +859,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             }
             renderedPlayers.clear();
             prunePlayerModelGeometryCache(new Set());
-            renderer.shadowMap.needsUpdate = true;
+            requestShadowRebuild(true);
           }
           syncPlayerHelpers();
           return;
@@ -1021,7 +1089,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
 
         prunePlayerModelGeometryCache(activeGeos);
         if (geometryOrTransformChanged) {
-          renderer.shadowMap.needsUpdate = true;
+          requestShadowRebuild(false);
         }
         syncPlayerHelpers();
       };
@@ -1031,25 +1099,67 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       const hitPoint = new THREE.Vector3();
       const hitNormal = new THREE.Vector3();
       const hoverVoxel = new THREE.Vector3(-1, -1, -1);
+      const projectedScratch = new THREE.Vector3();
+      let lastCanvasRect: DOMRect | null = null;
+
+      interface MapHitResult {
+        point: THREE.Vector3;
+        normal: THREE.Vector3;
+        voxelX?: number;
+        voxelY?: number;
+        voxelZ?: number;
+      }
 
       /**
-       * Closest raycast hit that is not hidden by the section slice. three's
-       * raycast only tests triangles, so sliced-away geometry would otherwise be
-       * pickable and lights could be attached to invisible voxels.
+       * Closest raycast hit that is not hidden by the section slice.
+       * Uses O(ray length) 3D DDA over `VoxelGrid` for maps instead of testing
+       * millions of triangles; falls back to triangle raycasting only for small `.kv6` meshes.
        */
-      const firstVisibleHit = (): THREE.Intersection | null => {
-        const hits = raycaster.intersectObject(voxelMesh, false);
-        for (const candidate of hits) {
-          if (isInsideSlice(candidate.point.x, candidate.point.y, candidate.point.z)) {
-            return candidate;
+      const firstVisibleHit = (): MapHitResult | null => {
+        const t0 = perfEnabled ? performance.now() : 0;
+        let result: MapHitResult | null = null;
+
+        const grid = voxelGridRef.current;
+        if (grid && builtMeshRef.current?.format !== 'kv6') {
+          const hit = raycastVoxelGrid(
+            grid,
+            raycaster.ray.origin,
+            raycaster.ray.direction,
+            activeCamera.far || 12000,
+            gridOffset,
+            sliceActive ? isInsideSlice : undefined,
+          );
+          if (hit) {
+            result = {
+              point: hit.point,
+              normal: hit.normal,
+              voxelX: hit.x,
+              voxelY: hit.y,
+              voxelZ: hit.z,
+            };
+          }
+        } else {
+          const hits = raycaster.intersectObject(voxelMesh, false);
+          for (const candidate of hits) {
+            if (isInsideSlice(candidate.point.x, candidate.point.y, candidate.point.z)) {
+              result = {
+                point: candidate.point,
+                normal: candidate.face?.normal ?? _worldUp,
+              };
+              break;
+            }
           }
         }
-        return null;
+
+        if (perfEnabled) {
+          perfStats.raycastMs = performance.now() - t0;
+        }
+        return result;
       };
 
       const pickVoxelAt = (clientX: number, clientY: number): boolean => {
         if (!voxelMesh.visible) return false;
-        const rect = renderer.domElement.getBoundingClientRect();
+        const rect = lastCanvasRect ?? (lastCanvasRect = renderer.domElement.getBoundingClientRect());
         if (rect.width < 1 || rect.height < 1) return false;
         pointerNdc.set(
           ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -1058,17 +1168,22 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         raycaster.setFromCamera(pointerNdc, activeCamera);
         const hit = firstVisibleHit();
         if (!hit) return false;
-        hitPoint.copy(hit.point);
-        if (hit.face && hit.face.normal) {
-          hitNormal.copy(hit.face.normal);
+        hitNormal.copy(hit.normal);
+        let vx: number;
+        let vy: number;
+        let vz: number;
+        if (hit.voxelX !== undefined && hit.voxelY !== undefined && hit.voxelZ !== undefined) {
+          vx = hit.voxelX;
+          vy = hit.voxelY;
+          vz = hit.voxelZ;
         } else {
-          hitNormal.set(0, 1, 0);
+          hitPoint.copy(hit.point);
+          // Step slightly inside the face so floor() lands on the solid voxel.
+          hitPoint.addScaledVector(hitNormal, -0.02);
+          vx = Math.floor(hitPoint.x + gridOffset.x);
+          vy = Math.floor(hitPoint.y + gridOffset.y);
+          vz = Math.floor(hitPoint.z + gridOffset.z);
         }
-        // Step slightly inside the face so floor() lands on the solid voxel.
-        hitPoint.addScaledVector(hitNormal, -0.02);
-        const vx = Math.floor(hitPoint.x + gridOffset.x);
-        const vy = Math.floor(hitPoint.y + gridOffset.y);
-        const vz = Math.floor(hitPoint.z + gridOffset.z);
         if (
           vx < 0 || vy < 0 || vz < 0 ||
           vx >= Math.round(gridSize.x) ||
@@ -1095,7 +1210,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           hideHover();
           return;
         }
-        const rect = renderer.domElement.getBoundingClientRect();
+        const rect = lastCanvasRect ?? (lastCanvasRect = renderer.domElement.getBoundingClientRect());
         if (rect.width < 1 || rect.height < 1) {
           hideHover();
           return;
@@ -1110,13 +1225,21 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           hideHover();
           return;
         }
-        hitPoint.copy(hit.point);
-        if (hit.face && hit.face.normal) hitNormal.copy(hit.face.normal);
-        else hitNormal.set(0, 1, 0);
-        hitPoint.addScaledVector(hitNormal, -0.02);
-        const vx = Math.floor(hitPoint.x + gridOffset.x);
-        const vy = Math.floor(hitPoint.y + gridOffset.y);
-        const vz = Math.floor(hitPoint.z + gridOffset.z);
+        let vx: number;
+        let vy: number;
+        let vz: number;
+        if (hit.voxelX !== undefined && hit.voxelY !== undefined && hit.voxelZ !== undefined) {
+          vx = hit.voxelX;
+          vy = hit.voxelY;
+          vz = hit.voxelZ;
+        } else {
+          hitPoint.copy(hit.point);
+          hitNormal.copy(hit.normal);
+          hitPoint.addScaledVector(hitNormal, -0.02);
+          vx = Math.floor(hitPoint.x + gridOffset.x);
+          vy = Math.floor(hitPoint.y + gridOffset.y);
+          vz = Math.floor(hitPoint.z + gridOffset.z);
+        }
         if (
           vx < 0 || vy < 0 || vz < 0 ||
           vx >= Math.round(gridSize.x) ||
@@ -1135,8 +1258,6 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         }
       };
 
-      const projectedScratch = new THREE.Vector3();
-      let lastCanvasRect: DOMRect | null = null;
       const projectWorldToScreen = (x: number, y: number, z: number) => {
         // Cached rect: the panel probes this every animation frame and a layout
         // read per frame is what actually costs here.
@@ -1304,14 +1425,20 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       };
 
       const drawFrame = () => {
+        const frameStart = perfEnabled ? performance.now() : 0;
+
         // Sync flashlight uniforms on every draw so slider changes take effect
         // even when the render loop is idle.
         const flashlightPlayer = spawnedPlayersRef.current.find((p) => p.flashlight.enabled);
         if (flashlightPlayer) {
           const fl = flashlightPlayer.flashlight;
+          const liveRec = renderedPlayers.get(flashlightPlayer.id);
+          const fx = liveRec ? liveRec.x : flashlightPlayer.x;
+          const fy = liveRec ? liveRec.y : flashlightPlayer.y;
+          const fz = liveRec ? liveRec.z : flashlightPlayer.z;
           _flashlightEuler.set((flashlightPlayer.pitch * Math.PI) / 180, (-flashlightPlayer.yaw * Math.PI) / 180, 0, 'YXZ');
           _flashlightDir.set(0, 0, -1).applyEuler(_flashlightEuler);
-          _flashlightPos.set(flashlightPlayer.x, flashlightPlayer.y + 1.6, flashlightPlayer.z);
+          _flashlightPos.set(fx, fy + 1.6, fz);
           _flashlightPos.addScaledVector(_flashlightDir, 0.1);
           _flashlightPos.y -= 0.05;
           sharedUniforms.uFlashlightEnabled.value = 1;
@@ -1325,17 +1452,22 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           );
           sharedUniforms.uFlashlightReach.value = fl.reach;
           sharedUniforms.uFlashlightConeCos.value = Math.cos((fl.cone * Math.PI) / 512);
-          sharedUniforms.uFlashlightIntensity.value = 6.0 + (fl.intensity / 255) * 1194.0;
+          sharedUniforms.uFlashlightIntensity.value = (fl.intensity / 255) * 8.0;
           sharedUniforms.uFlashlightTime.value = elapsedSec;
           sharedUniforms.uFlashlightId.value = flashlightPlayer.id.charCodeAt(0) + flashlightPlayer.id.charCodeAt(1) * 31 + flashlightPlayer.id.charCodeAt(2) * 961;
 
-          // Visible beam cone
+          // Visible beam cone (skipped on software GL to avoid full-screen additive overdraw)
           const halfAngle = Math.acos(
             THREE.MathUtils.clamp(sharedUniforms.uFlashlightConeCos.value, -1, 1),
           );
-          const baseOpacity = 0.08 + (fl.intensity / 255) * 0.22;
+          const baseOpacity = (fl.intensity / 255) * 0.28;
+          const beamVisible = !isSoftwareGl && fl.reach > 0 && fl.intensity > 0;
           _beamAxis.copy(_flashlightDir).negate();
           for (const layer of flashlightBeamLayers) {
+            if (!beamVisible) {
+              layer.mesh.visible = false;
+              continue;
+            }
             // Cap prevents tan() blowup: cone = 255 is already ~89.6 deg half-angle.
             const layerHalf = Math.min(halfAngle * layer.angleScale, Math.PI * 0.46);
             const layerReach = fl.reach * layer.reachScale;
@@ -1361,6 +1493,38 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         controls.autoRotateSpeed = settingsRef.current.autoRotateSpeed;
         syncGodRaysPass();
 
+        // Throttled shadow rebuilds: while dragging a player, rebuild at most ~5/sec
+        // instead of on every pointermove event; flush immediately once idle/dropped.
+        const frameNow = performance.now();
+        if (shadowDirty && (frameNow - lastShadowRebuild > 200 || !draggingPlayerId)) {
+          renderer.shadowMap.needsUpdate = true;
+          shadowDirty = false;
+          lastShadowRebuild = frameNow;
+        }
+        const shadowRebuiltThisFrame = !isSoftwareGl && renderer.shadowMap.needsUpdate;
+
+        if (perfEnabled && timerQueryExt && pendingGpuQuery) {
+          const available = glCtx.getQueryParameter(pendingGpuQuery, glCtx.QUERY_RESULT_AVAILABLE);
+          const disjoint = glCtx.getParameter(timerQueryExt.GPU_DISJOINT_EXT);
+          if (available) {
+            if (!disjoint) {
+              const ns = glCtx.getQueryParameter(pendingGpuQuery, glCtx.QUERY_RESULT) as number;
+              perfGpuAccum += ns / 1e6;
+              perfGpuSamples++;
+            }
+            glCtx.deleteQuery(pendingGpuQuery);
+            pendingGpuQuery = null;
+          }
+        }
+
+        let startedGpuQuery: WebGLQuery | null = null;
+        if (perfEnabled && timerQueryExt && !pendingGpuQuery) {
+          startedGpuQuery = glCtx.createQuery();
+          if (startedGpuQuery) {
+            glCtx.beginQuery(timerQueryExt.TIME_ELAPSED_EXT, startedGpuQuery);
+          }
+        }
+
         // Render with fallback: if composer fails (e.g. shader error in a pass),
         // fall back to direct renderer so the map remains visible.
         try {
@@ -1374,6 +1538,42 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
             console.error('[VoxelViewport] Fallback render also failed:', fallbackErr);
           }
         }
+
+        if (startedGpuQuery && timerQueryExt) {
+          glCtx.endQuery(timerQueryExt.TIME_ELAPSED_EXT);
+          pendingGpuQuery = startedGpuQuery;
+        }
+
+        if (perfEnabled) {
+          const wallMs = performance.now() - frameStart;
+          if (shadowRebuiltThisFrame) perfStats.shadowRebuilds++;
+          perfStats.frameMs = wallMs;
+          perfStats.calls = renderer.info.render.calls;
+          perfStats.triangles = renderer.info.render.triangles;
+          perfFrameAccum += wallMs;
+          perfFrameSamples++;
+          const nowPerf = performance.now();
+          if (nowPerf - lastPerfLog >= 1000 && perfFrameSamples > 0) {
+            const avgFrame = perfFrameAccum / perfFrameSamples;
+            const avgGpu = perfGpuSamples > 0 ? perfGpuAccum / perfGpuSamples : null;
+            perfStats.frameMs = avgFrame;
+            perfStats.gpuMs = avgGpu;
+            console.debug(
+              `[voxPerf] frame=${avgFrame.toFixed(2)}ms` +
+                (avgGpu !== null ? ` gpu=${avgGpu.toFixed(2)}ms` : '') +
+                ` raycast=${perfStats.raycastMs.toFixed(3)}ms` +
+                ` shadowRebuilds=${perfStats.shadowRebuilds}` +
+                ` calls=${perfStats.calls} tris=${perfStats.triangles}` +
+                (shadowRebuiltThisFrame ? ' (shadow)' : ''),
+            );
+            perfFrameAccum = 0;
+            perfFrameSamples = 0;
+            perfGpuAccum = 0;
+            perfGpuSamples = 0;
+            lastPerfLog = nowPerf;
+          }
+        }
+
         if (!isExporting) {
           onFrameRenderedRef.current?.();
         }
@@ -1673,8 +1873,21 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         keysDown.clear();
         isFreeDragging = false;
         if (draggingPlayerId) {
+          const rec = renderedPlayers.get(draggingPlayerId);
+          if (rec) setPlayerCastShadow(rec, true);
+          if (pendingDragCoords) {
+            onMovePlayerRef.current(
+              pendingDragCoords.id,
+              pendingDragCoords.x,
+              pendingDragCoords.y,
+              pendingDragCoords.z,
+            );
+            pendingDragCoords = null;
+          }
           draggingPlayerId = null;
           controls.enabled = settingsRef.current.cameraMode === 'orbit';
+          requestShadowRebuild(true);
+          requestRender();
         }
       };
 
@@ -1684,11 +1897,13 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
       let pointerDownHitPlayerId: string | null = null;
       let draggingPlayerId: string | null = null;
       let dragPlaneY = 0;
+      let lastDragCommitTime = 0;
+      let pendingDragCoords: { id: string; x: number; y: number; z: number } | null = null;
       const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
       const dragPlaneHit = new THREE.Vector3();
 
       const setRaycasterFromClient = (clientX: number, clientY: number): boolean => {
-        const rect = renderer.domElement.getBoundingClientRect();
+        const rect = lastCanvasRect ?? (lastCanvasRect = renderer.domElement.getBoundingClientRect());
         if (rect.width < 1 || rect.height < 1) return false;
         pointerNdc.set(
           ((clientX - rect.left) / rect.width) * 2 - 1,
@@ -1725,6 +1940,7 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         pickDownY = e.clientY;
         pointerDownHitPlayerId = null;
         draggingPlayerId = null;
+        pendingDragCoords = null;
 
         if (e.button !== 0) return;
         if (pickingModeRef.current || placingPlayerRef.current || movingPlayerIdRef.current) {
@@ -1736,6 +1952,9 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
           pointerDownHitPlayerId = hitId;
           if (settingsRef.current.cameraMode === 'orbit') {
             draggingPlayerId = hitId;
+            lastDragCommitTime = performance.now();
+            const draggedRec = renderedPlayers.get(hitId);
+            if (draggedRec) setPlayerCastShadow(draggedRec, false);
             const targetPlayer = spawnedPlayersRef.current.find((p) => p.id === hitId);
             dragPlaneY = targetPlayer ? targetPlayer.y : 0;
             dragPlane.constant = -dragPlaneY;
@@ -1751,11 +1970,25 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         const moved = Math.hypot(e.clientX - pickDownX, e.clientY - pickDownY);
 
         if (draggingPlayerId) {
+          const endedDragId = draggingPlayerId;
+          const draggedRec = renderedPlayers.get(endedDragId);
+          if (draggedRec) setPlayerCastShadow(draggedRec, true);
           draggingPlayerId = null;
           controls.enabled = settingsRef.current.cameraMode === 'orbit';
           if (renderer.domElement.hasPointerCapture(e.pointerId)) {
             renderer.domElement.releasePointerCapture(e.pointerId);
           }
+          if (pendingDragCoords) {
+            onMovePlayerRef.current(
+              pendingDragCoords.id,
+              pendingDragCoords.x,
+              pendingDragCoords.y,
+              pendingDragCoords.z,
+            );
+            pendingDragCoords = null;
+          }
+          requestShadowRebuild(true);
+          requestRender();
           if (moved <= 6 && pointerDownHitPlayerId) {
             onSelectPlayerRef.current(pointerDownHitPlayerId);
           }
@@ -1823,24 +2056,44 @@ export const VoxelViewport = forwardRef<VoxelViewportHandle, VoxelViewportProps>
         if (draggingPlayerId) {
           if (!setRaycasterFromClient(e.clientX, e.clientY)) return;
           const hit = voxelMesh.visible ? firstVisibleHit() : null;
-          if (hit && hit.face && hit.face.normal.y > 0.25) {
+          let nextX: number | null = null;
+          let nextY = dragPlaneY;
+          let nextZ: number | null = null;
+
+          if (hit && hit.normal.y > 0.25) {
             const [wx, wz] = clampWorldXZ(hit.point.x, hit.point.z);
             dragPlaneY = hit.point.y;
             dragPlane.constant = -dragPlaneY;
-            onMovePlayerRef.current(
-              draggingPlayerId,
-              Math.round(wx * 100) / 100,
-              Math.round(hit.point.y * 100) / 100,
-              Math.round(wz * 100) / 100,
-            );
+            nextX = Math.round(wx * 100) / 100;
+            nextY = Math.round(hit.point.y * 100) / 100;
+            nextZ = Math.round(wz * 100) / 100;
           } else if (raycaster.ray.intersectPlane(dragPlane, dragPlaneHit)) {
             const [wx, wz] = clampWorldXZ(dragPlaneHit.x, dragPlaneHit.z);
-            onMovePlayerRef.current(
-              draggingPlayerId,
-              Math.round(wx * 100) / 100,
-              Math.round(dragPlaneY * 100) / 100,
-              Math.round(wz * 100) / 100,
-            );
+            nextX = Math.round(wx * 100) / 100;
+            nextY = Math.round(dragPlaneY * 100) / 100;
+            nextZ = Math.round(wz * 100) / 100;
+          }
+
+          if (nextX !== null && nextZ !== null) {
+            const rec = renderedPlayers.get(draggingPlayerId);
+            if (rec) {
+              rec.root.position.set(nextX, nextY, nextZ);
+              rec.x = nextX;
+              rec.y = nextY;
+              rec.z = nextZ;
+            }
+            if (selectedPlayerIdRef.current === draggingPlayerId) {
+              playerSelectionRing.position.set(nextX, nextY + 0.04, nextZ);
+              playerSelectionRing.visible = true;
+            }
+            pendingDragCoords = { id: draggingPlayerId, x: nextX, y: nextY, z: nextZ };
+            const now = performance.now();
+            if (now - lastDragCommitTime >= 50) {
+              lastDragCommitTime = now;
+              onMovePlayerRef.current(draggingPlayerId, nextX, nextY, nextZ);
+              pendingDragCoords = null;
+            }
+            requestRender();
           }
           return;
         }
@@ -2249,6 +2502,9 @@ const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
         }
         frameId = 0;
 
+        // Ensure any throttled shadow rebuild completes before exporting.
+        if (shadowDirty) requestShadowRebuild(true);
+
         // Hide editor-only helpers (light markers, pick highlight, player selection ring) from exports.
         const savedMarkerVisible = markerGroup.visible;
         const savedHoverVisible = hoverBox.visible;
@@ -2433,6 +2689,7 @@ const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
 
       const exportGif = async (filename: string) => {
         isExporting = true;
+        if (shadowDirty) requestShadowRebuild(true);
         const resumeLoopAfterExport = isLoopRunning;
         if (isLoopRunning) {
           isLoopRunning = false;
@@ -2647,6 +2904,14 @@ const syncMesh = (meshData: BuiltVoxelMesh | null, instantCamera = false) => {
         controls.dispose();
         renderer.domElement.removeEventListener('webglcontextlost', handleContextLost);
         renderer.domElement.removeEventListener('webglcontextrestored', handleContextRestored);
+
+        if (pendingGpuQuery) {
+          glCtx.deleteQuery(pendingGpuQuery);
+          pendingGpuQuery = null;
+        }
+        if (perfEnabled && window.__voxPerf === perfStats) {
+          delete window.__voxPerf;
+        }
 
         voxelMesh.geometry.dispose();
         selectionRingGeo.dispose();

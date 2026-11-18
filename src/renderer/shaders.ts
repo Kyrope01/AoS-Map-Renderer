@@ -156,7 +156,7 @@ export const SHADER_PRESETS: ShaderPresetMeta[] = [
   { id: 'voxlap', category: 'cinematic', label: 'Voxlap 2011', description: 'Classic AoS face shading' },
 ];
 
-export const MAX_VOXEL_SHADOW_CASTERS = 16;
+export const MAX_VOXEL_SHADOW_CASTERS = 4;
 
 export interface SharedShaderUniforms {
   uTime: { value: number };
@@ -250,7 +250,7 @@ export function createSharedUniforms(): SharedShaderUniforms {
     uFogDensity: { value: 0.0024 },
     uFogStrength: { value: 1.0 },
     uFogRange: { value: 320 },
-    uHeightFog: { value: 0.2 },
+    uHeightFog: { value: 0 },
     uVolumetricClouds: { value: 0 },
     uVolumetricStrength: { value: 0.85 },
     uCloudAltitude: { value: 0.34 },
@@ -259,7 +259,7 @@ export function createSharedUniforms(): SharedShaderUniforms {
     uFlashlightEnabled: { value: 0 },
     uFlashlightPos: { value: new THREE.Vector3() },
     uFlashlightDir: { value: new THREE.Vector3(0, 0, -1) },
-    uFlashlightColor: { value: new THREE.Color('#FFB380') },
+    uFlashlightColor: { value: new THREE.Color('#FFFCFA') },
     uFlashlightReach: { value: 60 },
     uFlashlightConeCos: { value: Math.cos((90 * Math.PI) / 512) },
     uFlashlightIntensity: { value: 1 },
@@ -457,6 +457,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
     float c4 = c2 * c2;
 
     // 2. Active Distance Fog (In-Game AoS linear cutoff OR Atmospheric Exp2)
+    float sunScatter = clamp(uLightIntensity, 0.0, 1.5);
     if (uFogMode == 1) {
       float fogStart = camOffset + uFogRange * 0.24;
       float fogEnd = max(fogStart + 20.0, camOffset + uFogRange * 1.55);
@@ -464,7 +465,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
       float distRamp = smoothstep(camOffset + uModelRadius * 0.15, fogEnd, depthDist);
       float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * 0.65 * distRamp;
       float f = clamp(max(max(linFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * 0.12, c4 * 0.45);
+      vec3 inGameTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * sunScatter), c4 * 0.45);
       return mix(col, inGameTint, f);
     }
 
@@ -473,7 +474,7 @@ const FOG_AND_VOLUMETRIC_GLSL = /* glsl */ `
     float distRamp = smoothstep(uModelRadius * 0.35, uModelRadius * 3.0, max(0.0, depthDist));
     float valleyFog = exp(-max(0.0, worldPos.y) * 0.065) * uHeightFog * distRamp;
     float fogFactor = clamp(max(max(distFog, valleyFog), extraHorizonFade), 0.0, 1.0);
-    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * 0.10, c4 * cPos * 0.35);
+    vec3 mieFog = mix(uFogColor, uFogColor + uLightColor * (0.10 * sunScatter), c4 * cPos * 0.35);
     return mix(col, mieFog, fogFactor);
   }
 `;
@@ -487,8 +488,11 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
       uZenithColor: shared.uZenithColor,
       uHorizonColor: shared.uHorizonColor,
       uFogColor: shared.uFogColor,
+      uFogRange: shared.uFogRange,
+      uFogStrength: shared.uFogStrength,
       uLightDir: shared.uLightDir,
       uLightColor: shared.uLightColor,
+      uLightIntensity: shared.uLightIntensity,
       uShowSky: shared.uShowSky,
       uVolumetricClouds: shared.uVolumetricClouds,
       uVolumetricStrength: shared.uVolumetricStrength,
@@ -508,8 +512,11 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
       uniform vec3 uZenithColor;
       uniform vec3 uHorizonColor;
       uniform vec3 uFogColor;
+      uniform float uFogRange;
+      uniform float uFogStrength;
       uniform vec3 uLightDir;
       uniform vec3 uLightColor;
+      uniform float uLightIntensity;
       uniform float uShowSky;
       uniform float uVolumetricClouds;
       uniform float uVolumetricStrength;
@@ -528,6 +535,15 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
           sky = mix(baseHorizon, baseHorizon * 0.72, clamp(-dir.y * 3.0, 0.0, 1.0));
         }
 
+        float fogReachScale = clamp(320.0 / max(uFogRange, 40.0), 0.35, 3.0);
+        float fogHeightCeiling = mix(0.06, 0.42, clamp(fogReachScale / 3.0, 0.0, 1.0)) * clamp(uFogStrength, 0.0, 2.0);
+        float skyFog = (1.0 - smoothstep(0.0, max(0.04, fogHeightCeiling), max(dir.y, 0.0))) * clamp(uFogStrength, 0.0, 1.0);
+        float cPos = max(dot(dir, sunDir), 0.0);
+        float c2 = cPos * cPos;
+        float c4 = c2 * c2;
+        vec3 fogTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * clamp(uLightIntensity, 0.0, 1.5)), c4 * 0.45);
+
+        vec3 sunGlow = vec3(0.0);
         if (uShowSky > 0.5) {
           float sunDot = max(dot(dir, sunDir), 0.0001);
           float volBoost = uVolumetricClouds > 0.5 ? (1.0 + uVolumetricStrength * 0.35) : 1.0;
@@ -535,8 +551,15 @@ export function createSkyDomeMaterial(shared: SharedShaderUniforms): THREE.Shade
           float coreHalo = pow(sunDot, 120.0) * 0.85;
           float disc = smoothstep(0.9988, 0.9996, sunDot) * 2.2;
           float aboveHorizon = smoothstep(-0.06, 0.08, dir.y);
-          sky += uLightColor * (halo + coreHalo + disc) * aboveHorizon;
+          float sunStrength = max(uLightIntensity, 0.0) / 1.3;
+          sky += uLightColor * halo * aboveHorizon * sunStrength;
+          // Sun disc and tight core stay partially visible through lower-sky fog
+          // with a smooth lighter-top / dimmer-bottom vertical gradient.
+          float sunFogTransmittance = mix(1.0, 0.32, skyFog);
+          sunGlow = uLightColor * (coreHalo + disc) * aboveHorizon * sunStrength * sunFogTransmittance;
         }
+
+        sky = mix(sky, fogTint, skyFog) + sunGlow;
 
         gl_FragColor = vec4(sky, 1.0);
         #include <tonemapping_fragment>
@@ -743,22 +766,32 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
   uniform vec3 uVoxelGridOffset;
   uniform int uVoxelShadowsEnabled;
 
-  bool voxelShadowSolid(vec3 cell, vec3 worldEntry, vec3 worldExit) {
+  bool voxelShadowSolid(
+    vec3 cell,
+    vec3 worldEntry,
+    vec3 worldExit,
+    inout float cachedIndex,
+    inout float cachedPacked
+  ) {
     if (any(lessThan(cell, vec3(0.0))) || any(greaterThanEqual(cell, uVoxelGridSize))) return false;
     // Ignore removed portions when the section-slice control is active.
     if (uSliceAxis == 1 && min(worldEntry.x, worldExit.x) > uSliceCoord) return false;
     if (uSliceAxis == 2 && min(worldEntry.y, worldExit.y) > uSliceCoord) return false;
     if (uSliceAxis == 3 && min(worldEntry.z, worldExit.z) > uSliceCoord) return false;
     float index = (cell.y * uVoxelGridSize.z + cell.z) * uVoxelShadowAtlas.z + floor(cell.x / 8.0);
-    float rowY = floor((index + 0.1) / uVoxelShadowAtlas.x);
-    float colX = floor(index - rowY * uVoxelShadowAtlas.x + 0.1);
-    vec2 uv = (vec2(colX, rowY) + 0.5) / uVoxelShadowAtlas.xy;
-    float packed = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
+    if (index != cachedIndex) {
+      cachedIndex = index;
+      float rowY = floor((index + 0.1) / uVoxelShadowAtlas.x);
+      float colX = floor(index - rowY * uVoxelShadowAtlas.x + 0.1);
+      vec2 uv = (vec2(colX, rowY) + 0.5) / uVoxelShadowAtlas.xy;
+      cachedPacked = floor(texture2D(uVoxelShadowTexture, uv).r * 255.0 + 0.5);
+    }
+    float packed = cachedPacked;
     return mod(floor((packed + 0.01) / exp2(mod(cell.x, 8.0))), 2.0) >= 1.0;
   }
 
-  // Exact voxel-grid traversal. Light range is at most 120 voxels, so 384
-  // cell crossings cover even a diagonal ray at the maximum range.
+  // Exact voxel-grid traversal bounded by the ray length so short-range rays
+  // exit early while maximum-range diagonal rays still stay covered.
   float voxelShadowVisibility(vec3 worldPos, vec3 worldNormal, vec3 lightPos) {
     if (uVoxelShadowsEnabled == 0) return 1.0;
     vec3 origin = worldPos + worldNormal * 0.025;
@@ -772,12 +805,15 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     vec3 delta = 1.0 / max(abs(dir), vec3(0.000001));
     vec3 side = (stepDir * (cell - pos) + stepDir * 0.5 + 0.5) * delta;
     float travel = 0.0;
+    int maxSteps = int(min(384.0, rayLength * 1.75 + 8.0));
+    float cachedIndex = -1.0;
+    float cachedPacked = 0.0;
     for (int stepIndex = 0; stepIndex < 384; stepIndex++) {
-      if (travel >= rayLength - 0.001) break;
+      if (stepIndex >= maxSteps || travel >= rayLength - 0.001) break;
       vec3 entry = origin + dir * (travel + 0.0001);
       float exitDistance = min(rayLength, min(side.x, min(side.y, side.z)));
       vec3 exitPoint = origin + dir * exitDistance;
-      if (voxelShadowSolid(cell, entry, exitPoint)) return 0.0;
+      if (voxelShadowSolid(cell, entry, exitPoint, cachedIndex, cachedPacked)) return 0.0;
       if (side.x <= side.y && side.x <= side.z) {
         travel = side.x; side.x += delta.x; cell.x += stepDir.x;
       } else if (side.y <= side.z) {
@@ -789,7 +825,15 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     return 1.0;
   }
 
-  vec3 evalVoxelLight(int idx, vec3 worldPos, vec3 worldNormal, vec3 albedo, out vec3 lightPosOut) {
+  vec3 evalVoxelLight(
+    int idx,
+    vec3 worldPos,
+    vec3 worldNormal,
+    vec3 albedo,
+    out vec3 lightPosOut,
+    out float contribOut
+  ) {
+    contribOut = 0.0;
     float row = (float(idx) + 0.5) / float(${MAX_VOXEL_LIGHTS});
     vec4 positionRange = texture2D(uVoxelLightTexture, vec2(0.25, row));
     lightPosOut = positionRange.xyz;
@@ -806,25 +850,28 @@ const VOXEL_LIGHT_GLSL = /* glsl */ `
     if (diffuse <= 0.0 || colorIntensity.a <= 0.0) return vec3(0.0);
     float contrib = diffuse * falloff * colorIntensity.a / (1.0 + distanceSquared * 0.06);
     if (contrib < 0.004) return vec3(0.0);
+    contribOut = contrib;
     return albedo * colorIntensity.rgb * contrib;
   }
 
-  // Separate shadow-casting (0..16) and unshadowed (16..512) loops keep the GPU
+  // Separate shadow-casting (0..4) and unshadowed (4..512) loops keep the GPU
   // shader compiler from hoisting the 384-step DDA register state across all 512 slots.
   vec3 voxelLightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
     vec3 result = vec3(0.0);
     vec3 lightPos;
+    float contrib;
     int shadowCount = min(uVoxelLightCount, uShadowCasterCount);
     for (int i = 0; i < ${MAX_VOXEL_SHADOW_CASTERS}; i++) {
       if (i >= shadowCount) break;
-      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos, contrib);
       if (dot(lit, lit) > 0.0) {
-        result += lit * voxelShadowVisibility(worldPos, worldNormal, lightPos);
+        float vis = contrib > 0.02 ? voxelShadowVisibility(worldPos, worldNormal, lightPos) : 1.0;
+        result += lit * vis;
       }
     }
     for (int i = ${MAX_VOXEL_SHADOW_CASTERS}; i < ${MAX_VOXEL_LIGHTS}; i++) {
       if (i >= uVoxelLightCount) break;
-      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos);
+      vec3 lit = evalVoxelLight(i, worldPos, worldNormal, albedo, lightPos, contrib);
       result += lit;
     }
     return result;
@@ -846,32 +893,26 @@ export const PLAYER_FLASHLIGHT_GLSL = /* glsl */ `
   uniform float uFlashlightId;
 
   vec3 flashlightContribution(vec3 worldPos, vec3 worldNormal, vec3 albedo) {
-    if (uFlashlightEnabled <= 0) return vec3(0.0);
+    if (uFlashlightEnabled <= 0 || uFlashlightReach <= 0.0 || uFlashlightIntensity <= 0.0) return vec3(0.0);
     vec3 fromLight = worldPos - uFlashlightPos;
     float dist = length(fromLight);
     if (dist >= uFlashlightReach) return vec3(0.0);
     vec3 rayDir = fromLight / max(dist, 0.0001);
     float cone = dot(rayDir, normalize(uFlashlightDir));
     float cosOuter = min(uFlashlightConeCos, 0.999);
+    if (cone <= cosOuter) return vec3(0.0);
     // Main beam: full-range ramp, zero slope at the edge (soft boundary).
     float beam = smoothstep(cosOuter, 1.0, cone);
     // Gentle hotspot boost toward the axis; does not touch the outer edge.
     float cosHot = mix(cosOuter, 1.0, 0.6);
-    beam *= 0.8 + 0.2 * smoothstep(cosHot, 1.0, cone);
-    // Spill: faint halo past the reflector edge so light diffuses instead of
-    // stopping. The min() guarantees edge0 < edge1 even at cone = 255.
-    float halfAngle = acos(cosOuter);
-    float cosSpill = min(cos(min(halfAngle * 1.8, 1.45)), cosOuter - 0.001);
-    float spill = smoothstep(cosSpill, cosOuter, cone) * (1.0 - beam) * 0.12;
-    float coneFactor = beam + spill;
-    if (coneFactor <= 0.0) return vec3(0.0);
+    beam *= 0.75 + 0.25 * smoothstep(cosHot, 1.0, cone);
     float diffuse = max(dot(worldNormal, -rayDir), 0.0);
     if (diffuse <= 0.0) return vec3(0.0);
     // Zero slope at both ends: gentler near-field, softer far tail than (1-x)^2.
     float range = 1.0 - smoothstep(0.0, uFlashlightReach, dist);
-    float contrib = coneFactor * diffuse * range;
+    float contrib = beam * diffuse * range * uFlashlightIntensity;
     if (contrib < 0.004) return vec3(0.0);
-    return albedo * uFlashlightColor * contrib * uFlashlightIntensity;
+    return albedo * uFlashlightColor * contrib;
   }
 `;
 
