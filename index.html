@@ -4423,6 +4423,15 @@ void main() {
           sky = mix(baseHorizon, baseHorizon * 0.72, clamp(-dir.y * 3.0, 0.0, 1.0));
         }
 
+        float fogReachScale = clamp(320.0 / max(uFogRange, 40.0), 0.35, 3.0);
+        float fogHeightCeiling = mix(0.06, 0.42, clamp(fogReachScale / 3.0, 0.0, 1.0)) * clamp(uFogStrength, 0.0, 2.0);
+        float skyFog = (1.0 - smoothstep(0.0, max(0.04, fogHeightCeiling), max(dir.y, 0.0))) * clamp(uFogStrength, 0.0, 1.0);
+        float cPos = max(dot(dir, sunDir), 0.0);
+        float c2 = cPos * cPos;
+        float c4 = c2 * c2;
+        vec3 fogTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * clamp(uLightIntensity, 0.0, 1.5)), c4 * 0.45);
+
+        vec3 sunGlow = vec3(0.0);
         if (uShowSky > 0.5) {
           float sunDot = max(dot(dir, sunDir), 0.0001);
           float volBoost = uVolumetricClouds > 0.5 ? (1.0 + uVolumetricStrength * 0.35) : 1.0;
@@ -4431,19 +4440,14 @@ void main() {
           float disc = smoothstep(0.9988, 0.9996, sunDot) * 2.2;
           float aboveHorizon = smoothstep(-0.06, 0.08, dir.y);
           float sunStrength = max(uLightIntensity, 0.0) / 1.3;
-          sky += uLightColor * (halo + coreHalo + disc) * aboveHorizon * sunStrength;
+          sky += uLightColor * halo * aboveHorizon * sunStrength;
+          // Sun disc and tight core stay partially visible through lower-sky fog
+          // with a smooth lighter-top / dimmer-bottom vertical gradient.
+          float sunFogTransmittance = mix(1.0, 0.32, skyFog);
+          sunGlow = uLightColor * (coreHalo + disc) * aboveHorizon * sunStrength * sunFogTransmittance;
         }
 
-        // Apply scene distance fog across the lower sky so distant fogged voxels,
-        // ocean, and sky share the exact same fog veil instead of cutting out.
-        float fogReachScale = clamp(320.0 / max(uFogRange, 40.0), 0.35, 3.0);
-        float fogHeightCeiling = mix(0.06, 0.42, clamp(fogReachScale / 3.0, 0.0, 1.0)) * clamp(uFogStrength, 0.0, 2.0);
-        float skyFog = (1.0 - smoothstep(0.0, max(0.04, fogHeightCeiling), max(dir.y, 0.0))) * clamp(uFogStrength, 0.0, 1.0);
-        float cPos = max(dot(dir, sunDir), 0.0);
-        float c2 = cPos * cPos;
-        float c4 = c2 * c2;
-        vec3 fogTint = mix(uFogColor, uFogColor + uLightColor * (0.12 * clamp(uLightIntensity, 0.0, 1.5)), c4 * 0.45);
-        sky = mix(sky, fogTint, skyFog);
+        sky = mix(sky, fogTint, skyFog) + sunGlow;
 
         gl_FragColor = vec4(sky, 1.0);
         #include <tonemapping_fragment>
